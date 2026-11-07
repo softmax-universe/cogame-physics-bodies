@@ -21,7 +21,7 @@ import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-SOURCE_URL = "https://github.com/Metta-AI/cogame-physics-bodies/tree/main"
+SOURCE_URL = "https://github.com/softmax-universe/cogame-physics-bodies/tree/main"
 IMAGE = "{{PHYSICS_BODIES_IMAGE}}"
 
 DESCRIPTION = (
