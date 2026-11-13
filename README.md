@@ -148,7 +148,7 @@ with corrected match-length and scoring explanations.
 Mixed requires an explicit nonnegative `promptSeed` and selects training wording using `promptSeed % 5`.
 Selection stays fixed across seats, rounds, and retries, independently of simulation randomness.
 
-The `physics-bodies-rules-v3` bank varies complete arena, winning, support, posture, tilt, and control explanations.
+The `physics-bodies-rules-v4` bank varies complete arena, winning, support, posture, tilt, and control explanations.
 Strategy text, observation privacy, numeric rules, and reply syntax remain fixed.
 Prompt selection belongs to the decision engine, outside hashed physics and replay keyframes.
 

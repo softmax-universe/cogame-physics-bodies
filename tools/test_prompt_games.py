@@ -69,13 +69,14 @@ def play(
             metadata = view.pop("prompt_template")
             system, user = [m["content"] for m in observation["messages"]]
             assert metadata == {
-                "bank": "physics-bodies-rules-v3",
+                "bank": "physics-bodies-rules-v4",
                 "selection": wording,
                 "variant": selected,
                 "seed": prompt_seed,
                 "system_sha256": hashlib.sha256(system.encode()).hexdigest(),
                 "user_sha256": hashlib.sha256(user.encode()).hexdigest(),
             }
+            assert "//" not in system
             if system_bytes is None:
                 system_bytes = system
             assert system == system_bytes

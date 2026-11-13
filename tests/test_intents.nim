@@ -26,6 +26,26 @@ Hope that helps.""")
   check a.aggression == 9, "the fenced reply's aggression was lost"
   check a.say == "under it", "the fenced reply's say was lost"
 
+# --- string-aware balanced-brace extraction -----------------------------
+block:
+  let withBracesAndTrailing = parsed(
+    """{"note":"watch {rim} and \"}\" edge","stance":"brace","aggression":6} trailing {prose}""")
+  check withBracesAndTrailing.stance == stanceBrace,
+    "braces inside quoted note + trailing {prose} broke JSON extraction"
+  check withBracesAndTrailing.aggression == 6,
+    "aggression lost when trailing {prose} followed valid JSON"
+  check withBracesAndTrailing.note == """watch {rim} and "}" edge""",
+    "quoted braces inside note were corrupted"
+  let strayLeadQuote = parsed(
+    """5" clearance left: {"stance":"retreat","aggression":4} {extra}""")
+  check strayLeadQuote.stance == stanceRetreat and strayLeadQuote.aggression == 4,
+    "an unmatched quote in leading prose broke balanced-brace scanning"
+  let leadingProseBraces = parsed(
+    """Plan {draft "v1}: {"stance":"circle","circle_dir":-1,"aggression":5}""")
+  check leadingProseBraces.stance == stanceCircle and
+    leadingProseBraces.circleDir == -1,
+    "non-JSON {prose} braces before the reply object prevented extraction"
+
 # --- an aggression given as a PERCENTAGE --------------------------------
 block:
   let a = parsed("""{"stance":"charge","aggression":80}""")
