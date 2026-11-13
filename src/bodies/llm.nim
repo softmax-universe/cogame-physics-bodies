@@ -234,30 +234,16 @@ keeps you off the rim unless you tell it not to. You choose WHAT to do and HOW
 hard. You CANNOT talk to the other bug and it never sees anything you write.
 """
 
-const ReplyRules = """Reply with a single JSON object and NOTHING else. Your reply MUST begin with '{'.
+const ReplyRules = """Reply with a single JSON object and NOTHING else. Your reply MUST begin with '{' and include all 9 keys.
 Schema:
-{"note":"<=160 chars, your reasoning",
- "stance":"charge"|"brace"|"circle"|"lift"|"retreat"|"centre",
-   // charge  : drive into the other bug where it WILL be in lead_ticks, and
-   //           shove. The bread and butter.
-   // brace   : plant LOW facing the other bug and absorb. You barely move,
-   //           you take less tilt, and a bug that charges a brace bounces.
-   // circle  : orbit the other bug at about 1.40 m in circle_dir, trying to
-   //           end up with the rim behind IT and the centre behind YOU.
-   // lift    : close and get under it - the knockdown attempt. Slow, and it
-   //           loads tilt onto you too.
-   // retreat : back toward the ring centre away from the other bug.
-   // centre  : walk to the ring centre and hold it. Wins a decision.
- "aim":"foe"|"centre"|"bearing",   // what "charge"/"circle" point at
- "bearing_deg":0..359,             // only read when aim is "bearing"
- "aggression":0..10,               // 0 = coast, 10 = all in. At 10 the
-                                   // autopilot's rim guard is HALVED: you may
-                                   // push yourself out. That is the trade.
- "posture_bias":"low"|"even"|"high"|"auto",
- "lead_ticks":0..24,               // aim where it will be this many ticks from
-                                   // now (24 ticks = 1 second)
- "circle_dir":-1 or 1,             // -1 = clockwise, 1 = counter-clockwise
- "say":"<=48 chars"}               // spectators only; the other bug never sees it
+{"note":"<=160 chars","stance":"charge"|"brace"|"circle"|"lift"|"retreat"|"centre","aim":"foe"|"centre"|"bearing","bearing_deg":0..359,"aggression":0..10,"posture_bias":"low"|"even"|"high"|"auto","lead_ticks":0..24,"circle_dir":-1|1,"say":"<=48 chars"}
+- All 9 keys are required every turn (use "" for "note" or "say" when empty).
+- stance: "charge" drives into where the other bug will be in lead_ticks and shoves; "brace" plants LOW facing the other bug to absorb and bounce a charge with less tilt; "circle" orbits at ~1.40 m in circle_dir to put the rim behind the foe and the centre behind you; "lift" closes to get under the foe for a knockdown (slow, loads tilt onto you too); "retreat" backs toward the ring centre away from the foe; "centre" walks to the ring centre and holds it for a decision.
+- aim / bearing_deg: what "charge" and "circle" point at; bearing_deg (0..359) is only read when aim is "bearing".
+- aggression: 0 = coast, 10 = all in (at 10 the autopilot's rim guard is HALVED, so you may push yourself out).
+- lead_ticks: aim where the target will be this many ticks ahead (24 ticks = 1s).
+- circle_dir: -1 = clockwise, 1 = counter-clockwise.
+- say: spectators only (<=48 chars; the other bug never sees it).
 """
 
 proc systemPrompt*(selection: PromptSelection): string =
