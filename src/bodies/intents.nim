@@ -142,8 +142,7 @@ proc parsePostureBiasStrict*(text: string): PostureBias =
       return bias
   raise newException(IntentError, "invalid posture_bias: " & text)
 
-proc parseIntentReply*(text: string): BugIntent =
-  let payload = extractJsonObject(text)
+proc parseIntentObject*(payload: JsonNode): BugIntent =
   template supplied(key: string): bool =
     payload.hasKey(key) and payload[key].kind != JNull
 
@@ -168,6 +167,9 @@ proc parseIntentReply*(text: string): BugIntent =
     result.note = sanitizeNote(requireString(payload, "note"))
   if supplied("say"):
     result.say = sanitizeSay(requireString(payload, "say"))
+
+proc parseIntentReply*(text: string): BugIntent =
+  parseIntentObject(extractJsonObject(text))
 
 proc intentAction*(intent: BugIntent): JsonNode =
   ## The normalized policy response, excluding replay and transport metadata.
