@@ -117,15 +117,13 @@ no substitutions — is what proves it in a real browser.
 - `PLAYER_PROMPT` is never written to the replay or the results. The replay gets
   a redacted `register` record: the policy label, the kind, and the baseline.
 
-## Degrade, never hang
+## Model decision timing
 
-Every wait is bounded: the two batch deadlines, the inter-batch rate floor, the
-outer per-turn deadline, `lobbyJoinTimeoutTicks`, the 660 s engine stop and the
-bounded shutdown grace. Both seats' LLM calls go out as **one parallel batch**
-per turn (`curly.makeRequests`) — seats are never queried sequentially, which is
-the documented way to blow the wall clock. On two consecutive failures a seat
-plays the `pusher` intent and a `fallback` record names the cause. **No failure
-mode leaves a bug uncommanded.**
+Each model seat submits one decision per turn. Both seats can request their
+orders in parallel. The game allows up to `turnBudgetMs` for the turn
+(default 60 seconds). A timeout, malformed response, or disconnect ends the
+episode with a player failure. Scripted policies run only when explicitly
+selected. The episode wall-clock limit also applies.
 
 ## Tuning
 

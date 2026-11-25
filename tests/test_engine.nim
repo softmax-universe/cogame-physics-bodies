@@ -118,8 +118,6 @@ proc gameServeProc(args: GameServerArgs) {.thread.} =
 
 proc playingSim(): SimServer =
   var cfg = defaultMatchConfig()
-  cfg.attempt1Ms = 2000
-  cfg.retryMs = 2000
   cfg.turnBudgetMs = 4000
   cfg.turnSpacingMs = 0
   result = initSimServer(cfg)

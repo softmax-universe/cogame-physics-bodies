@@ -34,8 +34,6 @@ proc defaultGameConfig*(): GameConfig =
   result.knockdownsToLose = int(KnockdownsToLoseDefault)
   result.downTicks = int(DownTicksDefault)
   result.turnBudgetMs = TurnBudgetMsDefault
-  result.attempt1Ms = Attempt1MsDefault
-  result.retryMs = RetryMsDefault
   result.turnSpacingMs = TurnSpacingMsDefault
   result.wallClockBudgetSeconds = WallClockBudgetSecondsDefault
   result.lobbyJoinTimeoutTicks = LobbyJoinTimeoutTicksDefault
@@ -96,14 +94,7 @@ proc validate(config: var GameConfig) =
   config.shrinkStartTick = clamp(config.shrinkStartTick, 0, config.roundTicks)
   config.knockdownsToLose = clamp(config.knockdownsToLose, 1, 99)
   config.downTicks = clamp(config.downTicks, 1, 600)
-  ## curly hands the batch deadline to CURLOPT_TIMEOUT, whose granularity is
-  ## WHOLE SECONDS and whose conversion FLOORS — a sub-second value is not the
-  ## deadline it claims to be, so it is refused rather than silently floored
-  ## to zero (paintbot 0.1.2's scar: `attempt1Ms: 4500` really ran with 4 s).
-  config.attempt1Ms = clamp(config.attempt1Ms, 1000, 120_000)
-  config.retryMs = clamp(config.retryMs, 1000, 120_000)
-  config.turnBudgetMs = clamp(config.turnBudgetMs,
-    config.attempt1Ms + config.retryMs, 240_000)
+  config.turnBudgetMs = clamp(config.turnBudgetMs, 2000, 240_000)
   config.turnSpacingMs = clamp(config.turnSpacingMs, 0, 120_000)
   config.wallClockBudgetSeconds = clamp(config.wallClockBudgetSeconds, 10, 720)
   config.lobbyJoinTimeoutTicks = clamp(config.lobbyJoinTimeoutTicks, 24, 20_000)
@@ -196,8 +187,6 @@ proc update*(config: var GameConfig, configJson: string) =
     config.knockdownsToLose)
   config.downTicks = readInt(node, "downTicks", config.downTicks)
   config.turnBudgetMs = readInt(node, "turnBudgetMs", config.turnBudgetMs)
-  config.attempt1Ms = readInt(node, "attempt1Ms", config.attempt1Ms)
-  config.retryMs = readInt(node, "retryMs", config.retryMs)
   config.turnSpacingMs = readInt(node, "turnSpacingMs", config.turnSpacingMs)
   config.wallClockBudgetSeconds = readInt(node, "wallClockBudgetSeconds",
     config.wallClockBudgetSeconds)
@@ -303,8 +292,6 @@ proc configJson*(config: GameConfig, perm: array[BodyCount, int32]): string =
     "lobbyJoinTimeoutTicks": config.lobbyJoinTimeoutTicks,
     "wallClockBudgetSeconds": config.wallClockBudgetSeconds,
     "turnBudgetMs": config.turnBudgetMs,
-    "attempt1Ms": config.attempt1Ms,
-    "retryMs": config.retryMs,
     "turnSpacingMs": config.turnSpacingMs,
     "geometry": config.geometryJson(),
     "players": players,

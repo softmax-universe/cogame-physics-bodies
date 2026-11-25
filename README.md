@@ -57,7 +57,7 @@ src/bodies/
   control.nim     driveCommand — one intent -> one command byte per tick
   baselines.nim   the per-seat observation + `pusher` and `anchor`
   llm.nim         the Bedrock/Anthropic transport
-  decide.nim      the per-turn ONE PARALLEL BATCH, two deadlines, budget guard
+  decide.nim      one parallel batch per turn with a shared decision deadline
   global.nim      the board renderer (pixie bakes + sprite protocol)
   broadcast.nim   the chrome frame and the beat derivation
   replays.nim     the COWLDPBD codec wrapper, keyframes, the precompute walk

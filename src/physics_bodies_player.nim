@@ -45,7 +45,7 @@ proc handleDecisionRequest(client: LlmClient, prompt, label: string,
     seat = payload{"seat"}.getInt(0)
     system = payload{"system"}.getStr()
     obsJson = $payload["observation"]
-    deadlineMs = max(1000, payload{"deadline_ms"}.getInt(Attempt1MsDefault))
+    deadlineMs = max(1000, payload{"deadline_ms"}.getInt(TurnBudgetMsDefault))
     user = userMessage(prompt, obsJson)
     attemptId = $tick & "-" & $seat & "-1"
 

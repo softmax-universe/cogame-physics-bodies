@@ -233,9 +233,6 @@ block:
     check wallClock <= (episodeTimeout * 6) div 10,
       &"variant {id}'s wallClockBudgetSeconds {wallClock} is over 60 % of " &
       &"episodeTimeoutSeconds {episodeTimeout}"
-    check cfg{"attempt1Ms"}.getInt() + cfg{"retryMs"}.getInt() <=
-      cfg{"turnBudgetMs"}.getInt(),
-      &"variant {id}: attempt1Ms + retryMs > turnBudgetMs"
     check maxTicks mod turnTicks == 0,
       &"variant {id}: maxTicks {maxTicks} is not a multiple of turnTicks"
     check (roundTicks + resetTicks) mod turnTicks == 0,
