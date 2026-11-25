@@ -35,9 +35,21 @@ block:
   check simple.stance == stanceBrace and simple.aim == aimFoe and simple.source == isLlm,
     "stance-only model order did not apply"
   check simple.note == "" and simple.aggression == 7, "optional defaults were lost"
+  let plainFence = parseIntentReply("```\n{\"stance\":\"circle\"}\n```")
+  check plainFence.stance == stanceCircle, "plain fenced JSON order did not parse"
+  let tightFence = parseIntentReply("```JSON{\"stance\":\"retreat\"}```")
+  check tightFence.stance == stanceRetreat, "tight fenced JSON order did not parse"
   checkRejected("""{"stance":"charge","aim":"bearing"}""", "missing selected bearing")
   checkRejected("""prose {"stance":"brace"}""", "prose was scraped")
+  checkRejected("prose\n```json\n{\"stance\":\"brace\"}\n```", "prose before fence was scraped")
   checkRejected("""{"stance":"brace"} {"stance":"lift"}""", "multiple orders were scraped")
+  var rawErr = ""
+  try:
+    discard parseIntentReply("I will brace now.\n```json\n{\"stance\":\"brace\"}\n```")
+  except IntentError as err:
+    rawErr = err.msg
+  check rawErr.contains("I will brace now."),
+    "rejected reply error did not preserve bounded raw output: " & rawErr
 
 # --- strict rejection of shims, aliases, unit conversions, and repairs --
 block:

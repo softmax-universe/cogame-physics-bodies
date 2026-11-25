@@ -970,12 +970,17 @@ proc runServerLoop*(host: string = sim.DefaultHost,
                       evidence.accepted = true
                       engine.capture.recordAttempt(seat, evidence)
                   except CatchableError as parseErr:
+                    var detail = parseErr.msg
                     if hasEvidence:
                       evidence.accepted = false
                       evidence.rejectionReason = some(parseErr.msg)
                       engine.capture.recordAttempt(seat, evidence)
+                      if evidence.stopReason.isSome:
+                        let sr = evidence.stopReason.get()
+                        if sr.len > 0 and sr != "end_turn":
+                          detail = detail & " (stop_reason=" & sr & ")"
                     engine.capture.recordFailedDecision(seat, sim.tickCount, asRejected)
-                    failPolicy(seat, "parse_error", parseErr.msg)
+                    failPolicy(seat, "parse_error", detail)
                     break
                 if policyFailed:
                   break
