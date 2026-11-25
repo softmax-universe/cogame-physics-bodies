@@ -68,7 +68,7 @@ when isMainModule:
             let view = seatView(sim, seat, haveIntent[seat], intents[seat])
             let teacher = scriptedIntent(ctl.params, view, blPusher)
             let completion = teacher.intentAction()
-            let parsed = parseIntentReply($completion, intents[seat], haveIntent[seat])
+            let parsed = parseIntentReply($completion)
             doAssert parsed.intentAction() == completion
             rows.add($(%*{
               "episode_id": "physics-bodies-" & variant & "-" & $seed & "-" &

@@ -217,7 +217,7 @@ when isMainModule:
       if not textMode:
         for head in heads():
           doAssert candidate[head["name"].getStr()] in head["choices"]
-      let parsed = parseIntentObject(candidate, orders[seat], haveIntent[seat])
+      let parsed = parseIntentObject(candidate, requireTextFields = textMode)
       if not textMode: doAssert action(parsed) == candidate
       let executed = if textMode: parsed.intentAction() else: action(parsed)
       orders[seat] = parsed

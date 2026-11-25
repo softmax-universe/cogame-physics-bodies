@@ -1,26 +1,24 @@
-## The physics-bodies player container: a policy is just a prompt.
+## The physics-bodies player container.
 ##
-## This process is DELIBERATELY thin. It connects to its seat, sends ONE Sprite
-## v1 chat message carrying its registration, and then only receives. Every
-## decision happens inside the GAME server, because that is the only container
-## the platform injects the `anthropic_api_key` coworld secret into, and because
-## keeping the control layer server-side is what makes the recorded command-byte
-## log reproducible with no network in the loop.
+## Two explicit modes — never an implicit default:
+##   Model mode:    COWORLD_LLM_ENABLED=true (or non-empty PLAYER_PROMPT)
+##                  Calls COWORLD_LLM_ENDPOINT (hosted sidecar) or
+##                  ANTHROPIC_API_KEY on each decision_request from the game
+##                  server and returns the raw model reply + attempt evidence.
+##   Scripted mode: PLAYER_SCRIPTED=pusher | anchor
+##                  Registers the explicit scripted baseline; makes zero LLM
+##                  calls and requires no model route.
 ##
-##   PLAYER_PROMPT        a strategy in plain English -> this seat is an LLM seat
-##   PLAYER_SCRIPTED      pusher | anchor            -> this seat is scripted
-##   PLAYER_POLICY_LABEL  a free label for the replay's `register` record
-##
-## A seat that sets neither is `pusher`. To field your own policy, reuse this
-## image and set PLAYER_PROMPT:
-##
-##   coworld upload-policy <physics-bodies-image> --name my-bug \
-##     --run /bin/physics-bodies-player \
-##     --secret-env PLAYER_PROMPT="<your strategy>"
+## Optional:
+##   PLAYER_PROMPT        operator strategy guidance (model mode only; never
+##                        sent to the game server or written to replays)
+##   PLAYER_POLICY_LABEL  free label for the replay's `register` record
 
-import std/[json, options, os, strutils]
+import std/[json, monotimes, options, os, strutils, times]
 import bitworld/spriteprotocol
+import curly
 import whisky
+import bodies/[sim_types, intents, llm, training_capture]
 
 const
   ConnectAttempts = 240      ## 240 x 500 ms = 2 minutes of dialling.
@@ -29,49 +27,114 @@ const
   ResendEveryFrames = 24     ## ~1 s of frames at 24 Hz.
   ReconnectAttempts = 6
 
-proc registrationBlob(prompt, scripted, policy: string): string =
-  ## The one registration message. `scripted` is JSON null when the seat is an
-  ## LLM seat, so the server can tell "no baseline named" from "pusher named
-  ## explicitly".
-  var node = %*{"type": "register", "prompt": prompt, "policy": policy}
-  if scripted.len > 0:
+proc registrationBlob(mode, scripted, policy: string): string =
+  var node = %*{"type": "register", "mode": mode, "policy": policy}
+  if mode == "scripted":
     node["scripted"] = %scripted
-  else:
-    node["scripted"] = newJNull()
   blobFromSpriteChat($node)
 
 proc readyBlob(): string =
-  ## The Sprite v1 player-ready packet (0x85). Legitimate here in a way it is
-  ## not for an ordinary player client: this seat sends NO inputs at all (the
-  ## server computes every command byte), so the dead-reckoning hazard
-  ## docs/PROTOCOL.md warns about cannot arise, and a `fastMode` server can
-  ## advance the tick as soon as both seats have acknowledged the frame.
   result = newString(1)
   result[0] = char(0x85)
+
+proc handleDecisionRequest(client: LlmClient, prompt, label: string,
+                           payload: JsonNode): string =
+  let
+    turn = payload{"turn"}.getInt(-1)
+    tick = payload{"tick"}.getInt(0)
+    seat = payload{"seat"}.getInt(0)
+    system = payload{"system"}.getStr()
+    obsJson = $payload["observation"]
+    deadlineMs = max(1000, payload{"deadline_ms"}.getInt(Attempt1MsDefault))
+    user = userMessage(prompt, obsJson)
+    attemptId = $tick & "-" & $seat & "-1"
+
+  if client.isNil or client.disabled or client.transport == ltNone:
+    var evidence = newDecisionAttempt(attemptId, label, aoModel)
+    evidence.model = some(if client.isNil: DefaultSidecarModel else: client.requestedModel())
+    evidence.prompt = %*[
+      {"role": "system", "content": system},
+      {"role": "user", "content": user}
+    ]
+    let detail = "LLM endpoint unavailable (COWORLD_LLM_ENDPOINT / ANTHROPIC_API_KEY unset)"
+    evidence.rejectionReason = some(detail)
+    return $(%*{
+      "type": "decision_response",
+      "turn": turn,
+      "cause": "unavailable_endpoint",
+      "error": detail,
+      "latency_ms": 0,
+      "attempt": attemptEvidenceJson(evidence)
+    })
+
+  let request = client.requestFor(system, user, seat)
+  var batch: RequestBatch
+  batch.post(request.url, request.headers, request.body, $seat)
+  let started = getMonoTime()
+  let responses = client.curl.makeRequests(batch, max(1, deadlineMs div 1000))
+  let latency = (getMonoTime() - started).inMilliseconds.int
+  let resp = responses[0]
+  var evidence = modelAttempt(attemptId, label, client.requestedModel(),
+    request.url, request.body, resp.response, resp.error, latency)
+  try:
+    let text = client.textOf(resp.response, resp.error, request.url)
+    evidence.response = %text
+    return $(%*{
+      "type": "decision_response",
+      "turn": turn,
+      "reply": text,
+      "latency_ms": latency,
+      "attempt": attemptEvidenceJson(evidence)
+    })
+  except CatchableError as error:
+    evidence.rejectionReason = some(error.msg)
+    var cause = "provider_error"
+    if resp.error.len > 0:
+      cause = (if "timeout" in resp.error.toLowerAscii():
+                 "timeout" else: "transport_error")
+    elif error.msg.startsWith("llm throttled"):
+      cause = "throttled"
+    return $(%*{
+      "type": "decision_response",
+      "turn": turn,
+      "cause": cause,
+      "error": error.msg,
+      "latency_ms": latency,
+      "attempt": attemptEvidenceJson(evidence)
+    })
 
 when isMainModule:
   let url = getEnv("COWORLD_PLAYER_WS_URL", getEnv("COGAMES_ENGINE_WS_URL"))
   if url.len == 0:
     quit("COWORLD_PLAYER_WS_URL is not set", 1)
+
   let
+    llmEnabled = getEnv("COWORLD_LLM_ENABLED").strip().toLowerAscii() == "true"
     prompt = getEnv("PLAYER_PROMPT").strip()
-    scripted = getEnv("PLAYER_SCRIPTED").strip()
+    scripted = getEnv("PLAYER_SCRIPTED").strip().toLowerAscii()
+    wantsModel = llmEnabled or prompt.len > 0
+
+  if wantsModel and scripted.len > 0:
+    quit("physics-bodies player: cannot set both model mode (COWORLD_LLM_ENABLED/PLAYER_PROMPT) and PLAYER_SCRIPTED", 1)
+  if not wantsModel and scripted.len == 0:
+    quit("physics-bodies player: set COWORLD_LLM_ENABLED=true (or PLAYER_PROMPT) for model mode, or PLAYER_SCRIPTED=pusher|anchor for scripted mode", 1)
+  if not wantsModel and scripted notin ["pusher", "anchor"]:
+    quit("physics-bodies player: invalid PLAYER_SCRIPTED=" & scripted & " (expected pusher or anchor)", 1)
+
+  let
+    mode = if wantsModel: "model" else: "scripted"
     label = block:
       let explicit = getEnv("PLAYER_POLICY_LABEL").strip()
       if explicit.len > 0: explicit
-      elif prompt.len > 0: "prompt"
-      elif scripted.len > 0: scripted
-      else: "pusher"
-  echo "physics-bodies player: kind=",
-    (if prompt.len > 0: "llm" else: "scripted"),
-    " baseline=", (if scripted.len > 0: scripted else: "pusher"),
+      elif wantsModel: "model"
+      else: scripted
+    llmClient = if wantsModel: newLlmClient() else: nil
+
+  echo "physics-bodies player: mode=", mode,
+    (if mode == "scripted": " baseline=" & scripted else: " transport=" & $llmClient.transport & " model=" & llmClient.requestedModel()),
     " label=", label
 
   proc dial(attempts: int): WebSocket =
-    ## Bounded dialling. The game bakes its supersampled board plate BEFORE it
-    ## opens the listener, and the episode runner starts the players at the
-    ## same instant as the game — so the first dial always lands on a closed
-    ## port.
     for attempt in 0 ..< attempts:
       try:
         return newWebSocket(url)
@@ -87,41 +150,36 @@ when isMainModule:
     quit("physics-bodies player: game never accepted a connection", 1)
   echo "physics-bodies player: connected"
 
-  ## Each session is wrapped: whisky's `receiveMessage` RAISES on a close frame
-  ## or a truncated read (only a timeout returns none), and mummy's `send` only
-  ## QUEUES — so the game's own quit(0) can outrun the flushed frame. A naive
-  ## player exits 1 on that race and fails certification intermittently
-  ## (cogame-raid 0.1.3 -> 0.1.4). Exiting 0 on a dead socket is the fix.
-  ##
-  ## REGISTRATION IS RE-SENT, NOT SENT ONCE. Joins are slot-sequential, so a
-  ## seat whose slot is not the next open one is not admitted until the lower
-  ## slots have joined — and the lobby sends frames to a socket before it is
-  ## admitted, so the first registration and a single re-send keyed on the
-  ## first received frame can both land while the seat has no index yet. The
-  ## server holds an unappliable registration, and this end keeps re-sending it
-  ## for the first ~10 s of frames. Registering twice is harmless: the server
-  ## just re-reads the same fields.
   var reconnects = 0
   while true:
     var sessionFrames = 0
     try:
-      socket.send(registrationBlob(prompt, scripted, label), BinaryMessage)
+      socket.send(registrationBlob(mode, scripted, label), BinaryMessage)
       var resends = 0
       while true:
         let received = socket.receiveMessage()
         if received.isNone:
-          continue                  ## a read timeout, not a closed socket
+          continue
+        let msg = received.get()
+        if msg.kind == TextMessage:
+          var node: JsonNode = nil
+          try:
+            node = parseJson(msg.data)
+          except CatchableError:
+            node = nil
+          if not node.isNil and node.kind == JObject and
+              node{"type"}.getStr() == "decision_request" and mode == "model":
+            let reply = handleDecisionRequest(llmClient, prompt, label, node)
+            socket.send(reply, TextMessage)
+          continue
         inc sessionFrames
         if resends < RegistrationResends and
             sessionFrames mod ResendEveryFrames == 1:
           inc resends
-          socket.send(registrationBlob(prompt, scripted, label), BinaryMessage)
+          socket.send(registrationBlob(mode, scripted, label), BinaryMessage)
         socket.send(readyBlob(), BinaryMessage)
     except CatchableError as error:
       echo "physics-bodies player: socket closed (", error.msg, ")"
-    ## NEVER exit while the game is still serving: a dropped seat keeps its bug
-    ## for the whole episode and revives on reconnect. Bounded on both counts,
-    ## so this can never outlive the game or spin.
     if sessionFrames == 0 or reconnects >= ReconnectAttempts:
       break
     inc reconnects

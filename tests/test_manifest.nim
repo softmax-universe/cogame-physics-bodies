@@ -74,6 +74,22 @@ block:
     check id in occupied,
       &"declared player {id} occupies no certification slot — cert fails " &
       "`players_missing` (cogame-raid 0.1.2)"
+  check "model" in declared and "baseline" in declared,
+    "manifest.player must declare both explicit `model` and `baseline` roles"
+  check "model" in occupied and "baseline" in occupied,
+    "certification.players must seat both `model` and `baseline` (not all-baseline)"
+  for entry in manifest["player"]:
+    let id = entry["id"].getStr()
+    if id == "model":
+      check entry["env"]{"COWORLD_LLM_ENABLED"}.getStr() == "true",
+        "model player must set COWORLD_LLM_ENABLED=true"
+      check entry["env"]{"COWORLD_LLM_MODEL"}.getStr().len > 0,
+        "model player must declare COWORLD_LLM_MODEL"
+    elif id == "baseline":
+      check not entry["env"].hasKey("COWORLD_LLM_ENABLED"),
+        "baseline player must not enable paid model routes"
+      check entry["env"]{"PLAYER_SCRIPTED"}.getStr() == "pusher",
+        "baseline player must explicitly declare PLAYER_SCRIPTED=pusher"
 
 # --- results_schema == playerResultsJson, key for key ------------------
 block:

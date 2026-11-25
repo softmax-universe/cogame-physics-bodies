@@ -195,6 +195,7 @@ jobs:
           # by design).
           SMOKE_REQUIRE_REPLAY_JSON: "0"
           SMOKE_SEATS: "2"
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: ./tools/ci/docker_smoke.sh "${IMAGE}:ci"
 
       # The replay this episode produced is the ONLY replay in CI that is

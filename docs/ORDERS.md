@@ -27,44 +27,40 @@ One JSON object and nothing else. Your reply MUST begin with `{`.
 | `retreat` | back toward the ring centre, away from the other bug. |
 | `centre` | walk to the ring centre and hold it. Wins a decision. |
 
-## Fields, caps and repairs
+## Fields and strict validation
 
-| Field | Type | Cap / legal values | Repair when violated |
-|---|---|---|---|
-| `note` | string | **≤ 160 runes** | truncated to 160 runes |
-| `stance` | string | closed enum `charge, brace, circle, lift, retreat, centre`, case-insensitive | unrecognised / missing → last turn's `stance`, else `charge` |
-| `aim` | string | closed enum `foe, centre, bearing`, case-insensitive | unrecognised / missing → `foe` |
-| `bearing_deg` | integer | finite, taken `mod 360` into `0..359` | non-finite / missing → last turn's value, else `0` |
-| `aggression` | integer | finite, clamped `[0, 10]` | non-finite / missing → last turn's value, else `7` |
-| `posture_bias` | string | closed enum `low, even, high, auto`, case-insensitive | unrecognised / missing → `auto` |
-| `lead_ticks` | integer | finite, clamped `[0, 24]` | non-finite / missing → `4` |
-| `circle_dir` | integer | `−1` or `+1`; any other value takes the sign (`0` → `+1`) | non-finite / missing → last turn's value, else `+1` |
-| `say` | string | **≤ 48 runes** | truncated to 48 runes, then a printable-ASCII filter that also strips a leading `{` |
+| Field | Type | Legal values |
+|---|---|---|
+| `note` | string | required, **≤ 160 runes** (truncated on rune boundary) |
+| `stance` | string | required, exact canonical enum `charge, brace, circle, lift, retreat, centre` |
+| `aim` | string | required, exact canonical enum `foe, centre, bearing` |
+| `bearing_deg` | integer | required, `0..359` |
+| `aggression` | integer | required, `0..10` |
+| `posture_bias` | string | required, exact canonical enum `low, even, high, auto` |
+| `lead_ticks` | integer | required, `0..24` |
+| `circle_dir` | integer | required, `-1` or `1` |
+| `say` | string | required, **≤ 48 runes** (truncated on rune boundary, printable ASCII, braces stripped) |
 
 Three further caps on strings that reach the replay: `register.policy` ≤ 48
-runes, any recorded error text (`fallback.detail`) ≤ 200 runes, and the whole
-serialized `intent` record ≤ 480 runes. `register.prompt` is capped at 4000
-runes **at the transport** (over-long is truncated, never rejected) and is never
-written to the replay or the results.
+runes, any recorded failure text ≤ 200 runes, and the whole serialized `intent`
+record ≤ 480 runes. `PLAYER_PROMPT` is capped at 4000 runes inside the player
+container and is never sent to the game server or written to the replay or
+results.
 
 **Truncation is on rune (Unicode codepoint) boundaries, never bytes.** Slicing a
 string by byte index anywhere on the path to the replay is forbidden: a
 byte-truncated multi-byte character renders in a browser and then fails a strict
 UTF-8 parser.
 
-## Parsing is tolerant
+## Strict parsing and terminal policy failure
 
-Markdown fences are stripped; the outermost balanced `{…}` is taken if the model
-prefixed prose; numeric strings are accepted; `aggression` given as a percentage
-(`0..100`) is divided by 10; `bearing_deg` given in radians (`|v| ≤ 6.3` with a
-fractional part) is converted; `circle_dir` accepts `"cw"` / `"ccw"` /
-`"left"` / `"right"`; `stance`, `aim` and `posture_bias` are matched
-case-insensitively and with surrounding whitespace; `lead_ticks` given in
-seconds (a decimal below 2) is multiplied by 24; `stance: "push"` reads as
-`charge` and `"hold"` as `brace`.
-
-Only when **no** object with at least one usable field can be recovered do the
-retry and then the scripted fallback fire.
+No field is repaired, aliased, clamped, or borrowed from a previous turn. Any
+missing key, unexpected key, wrong type, out-of-range number, synonym, unit
+conversion, unavailable endpoint, timeout, disconnect, or provider error
+terminates the episode as an explicit policy failure via
+`COGAME_PLAYER_FAILURE_URI` with **no substitute move** and **no published
+scores**. Failed attempts are preserved in private trajectory evidence
+(`COGAME_SAVE_TRAJECTORY_URI`).
 
 ## What the autopilot does with your order
 
