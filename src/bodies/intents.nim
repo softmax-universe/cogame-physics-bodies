@@ -91,43 +91,17 @@ proc sanitizeNote*(text: string): string =
   text.replace("\n", " ").replace("\r", " ").strip().truncateRunes(MaxNoteRunes)
 
 proc extractJsonObject*(text: string): JsonNode =
-  ## The first valid balanced `{...}` JSON object in a model reply, tracking
-  ## strings and escapes inside each `{...}` candidate so markdown fences,
-  ## stray quotes, or extra `{...}` fragments in surrounding prose cannot
-  ## corrupt extraction.
-  for start in 0 ..< text.len:
-    if text[start] != '{':
-      continue
-    var
-      depth = 0
-      inString = false
-      escaped = false
-    for i in start ..< text.len:
-      let ch = text[i]
-      if inString:
-        if escaped: escaped = false
-        elif ch == '\\': escaped = true
-        elif ch == '"': inString = false
-        continue
-      case ch
-      of '"': inString = true
-      of '{': inc depth
-      of '}':
-        dec depth
-        if depth == 0:
-          try:
-            let node = parseJson(text[start .. i])
-            if node.kind == JObject:
-              return node
-          except CatchableError:
-            discard
-          break
-      else: discard
-  var head = text.strip()
-  if head.runeLen > 160:
-    head = head.truncateRunes(160) & "..."
-  raise newException(IntentError,
-    "no JSON object in reply: " & head.replace("\n", " "))
+  var value = text.strip()
+  if value.len >= 6 and value.startsWith("```") and value.endsWith("```"):
+    value = value[3 ..< value.len - 3].strip()
+    if value.len > 4 and value[0 ..< 4].toLowerAscii() == "json" and value[4].isSpaceAscii():
+      value = value[4 .. ^1].strip()
+  try:
+    result = parseJson(value)
+  except JsonParsingError:
+    raise newException(IntentError, "expected one JSON order object")
+  if result.kind != JObject:
+    raise newException(IntentError, "expected one JSON order object")
 
 proc requireField(payload: JsonNode, key: string): JsonNode =
   if not payload.hasKey(key):
@@ -168,48 +142,34 @@ proc parsePostureBiasStrict*(text: string): PostureBias =
       return bias
   raise newException(IntentError, "invalid posture_bias: " & text)
 
-proc parseIntentObject*(payload: JsonNode,
-                        requireTextFields = true): BugIntent =
-  ## Strictly validates one JSON order object against the published schema.
-  ## No field is repaired, defaulted from a previous turn, aliased, or clamped.
-  ## Any missing key, unknown key, wrong type, or out-of-range value raises
-  ## `IntentError`.
-  if payload.isNil or payload.kind != JObject:
-    raise newException(IntentError, "reply is not a JSON object")
+proc parseIntentObject*(payload: JsonNode): BugIntent =
+  template supplied(key: string): bool =
+    payload.hasKey(key) and payload[key].kind != JNull
 
-  const AllowedKeys = [
-    "note", "stance", "aim", "bearing_deg", "aggression",
-    "posture_bias", "lead_ticks", "circle_dir", "say"
-  ]
-  for key, _ in payload:
-    if key notin AllowedKeys:
-      raise newException(IntentError, "unexpected field: " & key)
-
+  result = defaultIntent()
   result.source = isLlm
-  result.latencyMs = 0
   result.stance = parseStanceStrict(requireString(payload, "stance"))
-  result.aim = parseAimStrict(requireString(payload, "aim"))
-  result.bearingDeg = requireIntInRange(payload, "bearing_deg", 0, 359)
-  result.aggression = requireIntInRange(payload, "aggression", 0, 10)
-  result.postureBias = parsePostureBiasStrict(requireString(payload, "posture_bias"))
-  result.leadTicks = requireIntInRange(payload, "lead_ticks", 0, 24)
-  let circleDir = requireIntInRange(payload, "circle_dir", -1, 1)
-  if circleDir notin [-1, 1]:
-    raise newException(IntentError, "circle_dir must be -1 or 1")
-  result.circleDir = circleDir
-
-  if requireTextFields or payload.hasKey("note"):
+  if supplied("aim"):
+    result.aim = parseAimStrict(requireString(payload, "aim"))
+  if result.aim == aimBearing or supplied("bearing_deg"):
+    result.bearingDeg = requireIntInRange(payload, "bearing_deg", 0, 359)
+  if supplied("aggression"):
+    result.aggression = requireIntInRange(payload, "aggression", 0, 10)
+  if supplied("posture_bias"):
+    result.postureBias = parsePostureBiasStrict(requireString(payload, "posture_bias"))
+  if supplied("lead_ticks"):
+    result.leadTicks = requireIntInRange(payload, "lead_ticks", 0, 24)
+  if supplied("circle_dir"):
+    result.circleDir = requireIntInRange(payload, "circle_dir", -1, 1)
+    if result.circleDir == 0:
+      raise newException(IntentError, "circle_dir must be -1 or 1")
+  if supplied("note"):
     result.note = sanitizeNote(requireString(payload, "note"))
-  else:
-    result.note = ""
-
-  if requireTextFields or payload.hasKey("say"):
+  if supplied("say"):
     result.say = sanitizeSay(requireString(payload, "say"))
-  else:
-    result.say = ""
 
 proc parseIntentReply*(text: string): BugIntent =
-  parseIntentObject(extractJsonObject(text), requireTextFields = true)
+  parseIntentObject(extractJsonObject(text))
 
 proc intentAction*(intent: BugIntent): JsonNode =
   ## The normalized policy response, excluding replay and transport metadata.

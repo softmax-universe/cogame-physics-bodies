@@ -30,20 +30,14 @@ block:
   check a.say == "under it", "valid reply say was not parsed"
   check a.note == "closing in", "valid reply note was not parsed"
 
-# --- string-aware balanced-brace extraction -----------------------------
 block:
-  let withBracesAndTrailing = parseIntentReply(
-    """{"note":"watch {rim} and \"}\" edge","stance":"brace","aim":"centre","bearing_deg":90,"aggression":6,"posture_bias":"low","lead_ticks":0,"circle_dir":-1,"say":"hold"} trailing {prose}""")
-  check withBracesAndTrailing.stance == stanceBrace,
-    "braces inside quoted note + trailing {prose} broke JSON extraction"
-  check withBracesAndTrailing.aggression == 6,
-    "aggression lost when trailing {prose} followed valid JSON"
-  check withBracesAndTrailing.note == """watch {rim} and "}" edge""",
-    "quoted braces inside note were corrupted"
-  let strayLeadQuote = parseIntentReply(
-    """5" clearance left: {"note":"","stance":"retreat","aim":"centre","bearing_deg":0,"aggression":4,"posture_bias":"even","lead_ticks":2,"circle_dir":1,"say":""} {extra}""")
-  check strayLeadQuote.stance == stanceRetreat and strayLeadQuote.aggression == 4,
-    "an unmatched quote in leading prose broke balanced-brace scanning"
+  let simple = parseIntentReply("```json\n{\"stance\":\"brace\",\"note\":null}\n```")
+  check simple.stance == stanceBrace and simple.aim == aimFoe and simple.source == isLlm,
+    "stance-only model order did not apply"
+  check simple.note == "" and simple.aggression == 7, "optional defaults were lost"
+  checkRejected("""{"stance":"charge","aim":"bearing"}""", "missing selected bearing")
+  checkRejected("""prose {"stance":"brace"}""", "prose was scraped")
+  checkRejected("""{"stance":"brace"} {"stance":"lift"}""", "multiple orders were scraped")
 
 # --- strict rejection of shims, aliases, unit conversions, and repairs --
 block:
@@ -78,14 +72,10 @@ block:
     """{"note":"","stance":"pirouette","aim":"foe","bearing_deg":0,"aggression":5,"posture_bias":"auto","lead_ticks":4,"circle_dir":1,"say":""}""",
     "unknown stance \"pirouette\" was accepted instead of rejected")
   checkRejected(
-    """{"stance":"brace"}""",
-    "partial JSON missing required fields was accepted instead of rejected")
-  checkRejected(
     """{"note":"","stance":"charge","aim":"foe","bearing_deg":-10,"aggression":7,"posture_bias":"auto","lead_ticks":4,"circle_dir":1,"say":""}""",
     "negative bearing_deg was accepted instead of rejected")
-  checkRejected(
-    """{"note":"","stance":"charge","aim":"foe","bearing_deg":0,"aggression":7,"posture_bias":"auto","lead_ticks":4,"circle_dir":1,"say":"","extra":1}""",
-    "unexpected extra key was accepted instead of rejected")
+  check parseIntentReply("""{"stance":"brace","bearing":0}""").stance == stanceBrace,
+    "unrelated input obscured an actionable stance"
   checkRejected("""{"weather":"fine"}""",
     "unrelated JSON object was accepted")
   checkRejected("I am afraid I cannot do that.",

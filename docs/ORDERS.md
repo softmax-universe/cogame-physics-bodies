@@ -7,14 +7,14 @@ you tell it not to. You choose **what** to do and **how hard**.
 
 ## The reply
 
-One JSON object and nothing else. Your reply MUST begin with `{`.
+Choose a stance. This is a complete order.
 
 ```json
-{"note": "it is low and braced; circle to put the rim behind it before I commit",
- "stance": "circle", "aim": "foe", "bearing_deg": 0,
- "aggression": 5, "posture_bias": "even", "lead_ticks": 4, "circle_dir": 1,
- "say": "walking it to the edge"}
+{"stance":"circle"}
 ```
+
+Optional controls adjust that stance for this turn. Omitted or null controls
+use the defaults below. For a chosen bearing, specify `bearing_deg`.
 
 ## Stances
 
@@ -31,15 +31,15 @@ One JSON object and nothing else. Your reply MUST begin with `{`.
 
 | Field | Type | Legal values |
 |---|---|---|
-| `note` | string | required, **≤ 160 runes** (truncated on rune boundary) |
+| `note` | string | optional, **≤ 160 runes** (truncated on rune boundary) |
 | `stance` | string | required, exact canonical enum `charge, brace, circle, lift, retreat, centre` |
-| `aim` | string | required, exact canonical enum `foe, centre, bearing` |
-| `bearing_deg` | integer | required, `0..359` |
-| `aggression` | integer | required, `0..10` |
-| `posture_bias` | string | required, exact canonical enum `low, even, high, auto` |
-| `lead_ticks` | integer | required, `0..24` |
-| `circle_dir` | integer | required, `-1` or `1` |
-| `say` | string | required, **≤ 48 runes** (truncated on rune boundary, printable ASCII, braces stripped) |
+| `aim` | string | default `foe`; also `centre` or `bearing` |
+| `bearing_deg` | integer | required for `aim: "bearing"`, `0..359` |
+| `aggression` | integer | default 7, `0..10` |
+| `posture_bias` | string | default `auto`; also `low, even, high` |
+| `lead_ticks` | integer | default 4, `0..24` |
+| `circle_dir` | integer | default 1, `-1` or `1` |
+| `say` | string | optional, **≤ 48 runes** (truncated on rune boundary, printable ASCII, braces stripped) |
 
 Three further caps on strings that reach the replay: `register.policy` ≤ 48
 runes, any recorded failure text ≤ 200 runes, and the whole serialized `intent`
@@ -55,7 +55,7 @@ UTF-8 parser.
 ## Strict parsing and terminal policy failure
 
 No field is repaired, aliased, clamped, or borrowed from a previous turn. Any
-missing key, unexpected key, wrong type, out-of-range number, synonym, unit
+missing stance, missing requested bearing, wrong control type, out-of-range number, synonym, unit
 conversion, unavailable endpoint, timeout, disconnect, or provider error
 terminates the episode as an explicit policy failure via
 `COGAME_PLAYER_FAILURE_URI` with **no substitute move** and **no published

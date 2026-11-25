@@ -66,15 +66,13 @@ the Coworld LLM sidecar (`COWORLD_LLM_ENDPOINT`) inside its own player pod, and
 returns a JSON `decision_response` text frame with its reply and attempt
 evidence.
 
-THE REPLY is a single JSON object with all 9 required keys:
+Choose a stance: {"stance":"brace"}. Other stances are charge, circle, lift,
+retreat, and centre. Optional controls default to aim "foe", aggression 7,
+posture_bias "auto", lead_ticks 4, and circle_dir 1. Set bearing_deg (0..359)
+when aiming at "bearing". Optional note and say strings are capped at 160 and
+48 characters respectively. See orders.md for ranges and tactical effects.
 
-  {"note":"<=160 runes","stance":"charge"|"brace"|"circle"|"lift"|"retreat"|"centre",
-   "aim":"foe"|"centre"|"bearing","bearing_deg":0..359,"aggression":0..10,
-   "posture_bias":"low"|"even"|"high"|"auto","lead_ticks":0..24,
-   "circle_dir":-1|1,"say":"<=48 runes"}
-
-Validation is STRICT: no field is repaired, aliased, clamped, or borrowed from a
-previous turn. Any unavailable endpoint, timeout, disconnect, transport error,
+An unavailable endpoint, timeout, disconnect, transport error,
 or invalid reply terminates the episode as an explicit policy failure via
 COGAME_PLAYER_FAILURE_URI with NO substitute action and NO published scores.
 Failed attempts are preserved in private trajectory evidence.
