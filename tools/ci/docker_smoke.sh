@@ -220,6 +220,7 @@ for ((slot = 0; slot < seats; slot++)); do
   eval "penv=( $(cat "${work_dir}/env-${slot}.args") )"
   eval "pcmd=( $(cat "${work_dir}/cmd-${slot}.args") )"
   docker run -d --name "${prefix}-p${slot}" --network "${network}" \
+    --add-host=host.docker.internal:host-gateway \
     -e COWORLD_PLAYER_WS_URL="ws://${prefix}-game:${port}/player?slot=${slot}&token=token-${slot}" \
     ${penv[@]+"${penv[@]}"} \
     "${image}" ${pcmd[@]+"${pcmd[@]}"} >/dev/null
