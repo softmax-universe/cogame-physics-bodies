@@ -132,8 +132,7 @@ proc turn*(engine: var DecisionEngine, sim: SimServer, turnIndex: int,
   if open.len > 0:
     let
       spentMs = (getMonoTime() - turnStart).inMilliseconds.int
-      remainingMs = max(0, sim.config.turnBudgetMs - spentMs)
-      deadlineMs = max(1000, min(sim.config.attempt1Ms, remainingMs))
+      deadlineMs = max(1000, sim.config.turnBudgetMs - spentMs)
     if getMonoTime() - turnStart >= budget:
       let seat = open[0]
       let detail = "per-turn budget exhausted before request"

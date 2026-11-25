@@ -135,9 +135,7 @@ const
   KnockoutBonusMicro* = 250_000'i64
 
   ## --- Decision layer defaults -------------------------------------------
-  TurnBudgetMsDefault* = 16_000
-  Attempt1MsDefault* = 9_000
-  RetryMsDefault* = 5_000
+  TurnBudgetMsDefault* = 60_000
   TurnSpacingMsDefault* = 6_000
   WallClockBudgetSecondsDefault* = 660
   LobbyJoinTimeoutTicksDefault* = 720
@@ -267,8 +265,6 @@ type
     knockdownsToLose*: int
     downTicks*: int
     turnBudgetMs*: int
-    attempt1Ms*: int
-    retryMs*: int
     turnSpacingMs*: int
     wallClockBudgetSeconds*: int
     lobbyJoinTimeoutTicks*: int
