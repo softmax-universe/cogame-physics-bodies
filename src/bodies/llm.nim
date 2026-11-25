@@ -152,8 +152,8 @@ keeps you off the rim unless you tell it not to. You choose WHAT to do and HOW
 hard. You CANNOT talk to the other bug and it never sees anything you write.
 """
 
-const ReplyRules = """Reply with a single JSON object choosing one stance. For example: {"stance":"brace"}.
-Optional controls: aim defaults to "foe", aggression to 7, posture_bias to "auto", lead_ticks to 4, and circle_dir to 1. With aim "bearing", give bearing_deg in degrees. You may add a short note (160 characters) or a spectator line in say (48 characters).
+const ReplyRules = """Reply with a single JSON object and nothing else - no prose, explanation, or extra text before or after. Choose one stance, for example: {"stance":"brace"}.
+Optional controls: aim defaults to "foe", aggression to 7, posture_bias to "auto", lead_ticks to 4, and circle_dir to 1. With aim "bearing", give bearing_deg in degrees. You may include a short note (<=160 chars) or spectator say (<=48 chars) inside the JSON object.
 - stance: "charge" drives into where the other bug will be in lead_ticks and shoves; "brace" plants LOW facing the other bug to absorb and bounce a charge with less tilt; "circle" orbits at ~1.40 m in circle_dir to put the rim behind the foe and the centre behind you; "lift" closes to get under the foe for a knockdown (slow, loads tilt onto you too); "retreat" backs toward the ring centre away from the foe; "centre" walks to the ring centre and holds it for a decision.
 - aim / bearing_deg: what "charge" and "circle" point at; bearing_deg (0..359) is only read when aim is "bearing".
 - aggression: 0 = coast, 10 = all in (at 10 the autopilot's rim guard is HALVED, so you may push yourself out).

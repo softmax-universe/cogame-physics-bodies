@@ -90,18 +90,29 @@ proc sanitizeNote*(text: string): string =
   ## Newlines collapse to spaces so one record stays one line.
   text.replace("\n", " ").replace("\r", " ").strip().truncateRunes(MaxNoteRunes)
 
+proc previewReply(text: string): string =
+  let cleaned = text.replace("\r", " ").replace("\n", " ").strip()
+  if cleaned.len == 0:
+    return "<empty>"
+  if cleaned.runeLen > 120:
+    return cleaned.truncateRunes(120) & "..."
+  cleaned
+
 proc extractJsonObject*(text: string): JsonNode =
   var value = text.strip()
   if value.len >= 6 and value.startsWith("```") and value.endsWith("```"):
     value = value[3 ..< value.len - 3].strip()
-    if value.len > 4 and value[0 ..< 4].toLowerAscii() == "json" and value[4].isSpaceAscii():
+    if value.len > 4 and value[0 ..< 4].toLowerAscii() == "json" and
+        (value[4].isSpaceAscii() or value[4] == '{'):
       value = value[4 .. ^1].strip()
   try:
     result = parseJson(value)
   except JsonParsingError:
-    raise newException(IntentError, "expected one JSON order object")
+    raise newException(IntentError,
+      "expected one JSON order object; got: " & previewReply(text))
   if result.kind != JObject:
-    raise newException(IntentError, "expected one JSON order object")
+    raise newException(IntentError,
+      "expected one JSON order object; got: " & previewReply(text))
 
 proc requireField(payload: JsonNode, key: string): JsonNode =
   if not payload.hasKey(key):
