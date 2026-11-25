@@ -1,4 +1,4 @@
-## 6. Tolerant parsing, repair, and the RUNE discipline.
+## 6. Strict order parsing and the RUNE discipline.
 
 import std/[json, strformat, strutils, unicode]
 import bodies/[sim, intents]
@@ -10,120 +10,97 @@ template check(condition: bool, message: string) =
     echo "FAIL: ", message
     inc failures
 
+proc checkRejected(text: string, message: string) =
+  var raised = false
+  try:
+    discard parseIntentReply(text)
+  except IntentError:
+    raised = true
+  check raised, message
+
 let base = defaultIntent()
 
-proc parsed(text: string, previous = base, hasPrevious = true): BugIntent =
-  parseIntentReply(text, previous, hasPrevious)
-
-# --- prose-prefixed and fenced JSON -------------------------------------
+# --- valid canonical 9-key JSON reply -----------------------------------
 block:
-  let a = parsed("""Sure! Here is my order:
-```json
-{"stance":"lift","aggression":9,"say":"under it"}
-```
-Hope that helps.""")
-  check a.stance == stanceLift, "a fenced, prose-wrapped reply did not parse"
-  check a.aggression == 9, "the fenced reply's aggression was lost"
-  check a.say == "under it", "the fenced reply's say was lost"
+  let a = parseIntentReply(
+    """{"note":"closing in","stance":"lift","aim":"foe","bearing_deg":0,"aggression":9,"posture_bias":"auto","lead_ticks":4,"circle_dir":1,"say":"under it"}""")
+  check a.stance == stanceLift, "valid reply stance was not parsed"
+  check a.aim == aimFoe, "valid reply aim was not parsed"
+  check a.aggression == 9, "valid reply aggression was not parsed"
+  check a.say == "under it", "valid reply say was not parsed"
+  check a.note == "closing in", "valid reply note was not parsed"
 
 # --- string-aware balanced-brace extraction -----------------------------
 block:
-  let withBracesAndTrailing = parsed(
-    """{"note":"watch {rim} and \"}\" edge","stance":"brace","aggression":6} trailing {prose}""")
+  let withBracesAndTrailing = parseIntentReply(
+    """{"note":"watch {rim} and \"}\" edge","stance":"brace","aim":"centre","bearing_deg":90,"aggression":6,"posture_bias":"low","lead_ticks":0,"circle_dir":-1,"say":"hold"} trailing {prose}""")
   check withBracesAndTrailing.stance == stanceBrace,
     "braces inside quoted note + trailing {prose} broke JSON extraction"
   check withBracesAndTrailing.aggression == 6,
     "aggression lost when trailing {prose} followed valid JSON"
   check withBracesAndTrailing.note == """watch {rim} and "}" edge""",
     "quoted braces inside note were corrupted"
-  let strayLeadQuote = parsed(
-    """5" clearance left: {"stance":"retreat","aggression":4} {extra}""")
+  let strayLeadQuote = parseIntentReply(
+    """5" clearance left: {"note":"","stance":"retreat","aim":"centre","bearing_deg":0,"aggression":4,"posture_bias":"even","lead_ticks":2,"circle_dir":1,"say":""} {extra}""")
   check strayLeadQuote.stance == stanceRetreat and strayLeadQuote.aggression == 4,
     "an unmatched quote in leading prose broke balanced-brace scanning"
-  let leadingProseBraces = parsed(
-    """Plan {draft "v1}: {"stance":"circle","circle_dir":-1,"aggression":5}""")
-  check leadingProseBraces.stance == stanceCircle and
-    leadingProseBraces.circleDir == -1,
-    "non-JSON {prose} braces before the reply object prevented extraction"
 
-# --- an aggression given as a PERCENTAGE --------------------------------
+# --- strict rejection of shims, aliases, unit conversions, and repairs --
 block:
-  let a = parsed("""{"stance":"charge","aggression":80}""")
-  check a.aggression == 8,
-    &"aggression 80 became {a.aggression}, want 8 (percentage form)"
-
-# --- a bearing given in RADIANS ------------------------------------------
-block:
-  let a = parsed("""{"stance":"charge","aim":"bearing","bearing_deg":2.4}""")
-  check a.bearingDeg == 138,
-    &"bearing 2.4 rad became {a.bearingDeg} deg, want 138 (2.4 rad = 137.5)"
-
-# --- circle_dir as a word ------------------------------------------------
-block:
-  check parsed("""{"circle_dir":"cw"}""").circleDir == -1,
-    "circle_dir \"cw\" did not become -1"
-  check parsed("""{"circle_dir":"ccw"}""").circleDir == 1,
-    "circle_dir \"ccw\" did not become +1"
-  check parsed("""{"circle_dir":"left"}""").circleDir == 1,
-    "circle_dir \"left\" did not become +1"
-  check parsed("""{"circle_dir":0}""").circleDir == 1,
-    "circle_dir 0 did not take the positive sign"
-
-# --- lead_ticks given in SECONDS ----------------------------------------
-block:
-  let a = parsed("""{"lead_ticks":0.5}""")
-  check a.leadTicks == 12, &"lead_ticks 0.5 s became {a.leadTicks}, want 12"
-
-# --- the two stance synonyms --------------------------------------------
-block:
-  check parsed("""{"stance":"push"}""").stance == stanceCharge,
-    "stance \"push\" did not read as charge"
-  check parsed("""{"stance":"hold"}""").stance == stanceBrace,
-    "stance \"hold\" did not read as brace"
-  check parsed("""{"stance":"  CIRCLE  "}""").stance == stanceCircle,
-    "stance is not case- and whitespace-insensitive"
-
-# --- an unknown stance keeps LAST TURN's, else charge -------------------
-block:
-  var previous = base
-  previous.stance = stanceCentre
-  check parsed("""{"aggression":5,"stance":"pirouette"}""",
-    previous).stance == stanceCentre,
-    "an unknown stance did not keep last turn's"
-  check parsed("""{"aggression":5,"stance":"pirouette"}""",
-    base, hasPrevious = false).stance == stanceCharge,
-    "an unknown stance with no history did not fall back to charge"
-
-# --- absent and out-of-range fields -------------------------------------
-block:
-  let a = parsed("""{"stance":"brace"}""", base, hasPrevious = false)
-  check a.aim == aimFoe, "a missing aim did not default to foe"
-  check a.aggression == 7, "a missing aggression did not default to 7"
-  check a.leadTicks == 4, "a missing lead_ticks did not default to 4"
-  check a.postureBias == biasAuto,
-    "a missing posture_bias did not default to auto"
-  let b = parsed("""{"aggression":99,"lead_ticks":900,"bearing_deg":-400}""")
-  check b.aggression == 10, &"aggression 99 clamped to {b.aggression}, want 10"
-  check b.leadTicks == 24, &"lead_ticks 900 clamped to {b.leadTicks}, want 24"
-  check b.bearingDeg >= 0 and b.bearingDeg <= 359,
-    &"bearing -400 became {b.bearingDeg}"
-  let c = parsed("""{"posture_bias":"sideways"}""")
-  check c.postureBias == biasAuto,
-    "an unknown posture_bias did not repair to auto"
+  checkRejected(
+    """{"note":"","stance":"push","aim":"foe","bearing_deg":0,"aggression":7,"posture_bias":"auto","lead_ticks":4,"circle_dir":1,"say":""}""",
+    "synonym stance \"push\" was accepted instead of rejected")
+  checkRejected(
+    """{"note":"","stance":"hold","aim":"foe","bearing_deg":0,"aggression":7,"posture_bias":"auto","lead_ticks":4,"circle_dir":1,"say":""}""",
+    "synonym stance \"hold\" was accepted instead of rejected")
+  checkRejected(
+    """{"note":"","stance":"center","aim":"foe","bearing_deg":0,"aggression":7,"posture_bias":"auto","lead_ticks":4,"circle_dir":1,"say":""}""",
+    "alias stance \"center\" was accepted instead of rejected")
+  checkRejected(
+    """{"note":"","stance":"charge","aim":"center","bearing_deg":0,"aggression":7,"posture_bias":"auto","lead_ticks":4,"circle_dir":1,"say":""}""",
+    "alias aim \"center\" was accepted instead of rejected")
+  checkRejected(
+    """{"note":"","stance":"charge","aim":"foe","bearing_deg":0,"aggression":80,"posture_bias":"auto","lead_ticks":4,"circle_dir":1,"say":""}""",
+    "out-of-range percentage aggression 80 was accepted instead of rejected")
+  checkRejected(
+    """{"note":"","stance":"charge","aim":"bearing","bearing_deg":2.4,"aggression":7,"posture_bias":"auto","lead_ticks":4,"circle_dir":1,"say":""}""",
+    "radian float bearing_deg 2.4 was accepted instead of rejected")
+  checkRejected(
+    """{"note":"","stance":"charge","aim":"foe","bearing_deg":0,"aggression":7,"posture_bias":"auto","lead_ticks":0.5,"circle_dir":1,"say":""}""",
+    "fractional seconds lead_ticks 0.5 was accepted instead of rejected")
+  checkRejected(
+    """{"note":"","stance":"charge","aim":"foe","bearing_deg":0,"aggression":7,"posture_bias":"auto","lead_ticks":4,"circle_dir":"cw","say":""}""",
+    "string circle_dir \"cw\" was accepted instead of rejected")
+  checkRejected(
+    """{"note":"","stance":"charge","aim":"foe","bearing_deg":0,"aggression":7,"posture_bias":"auto","lead_ticks":4,"circle_dir":0,"say":""}""",
+    "circle_dir 0 was accepted instead of rejected")
+  checkRejected(
+    """{"note":"","stance":"pirouette","aim":"foe","bearing_deg":0,"aggression":5,"posture_bias":"auto","lead_ticks":4,"circle_dir":1,"say":""}""",
+    "unknown stance \"pirouette\" was accepted instead of rejected")
+  checkRejected(
+    """{"stance":"brace"}""",
+    "partial JSON missing required fields was accepted instead of rejected")
+  checkRejected(
+    """{"note":"","stance":"charge","aim":"foe","bearing_deg":-10,"aggression":7,"posture_bias":"auto","lead_ticks":4,"circle_dir":1,"say":""}""",
+    "negative bearing_deg was accepted instead of rejected")
+  checkRejected(
+    """{"note":"","stance":"charge","aim":"foe","bearing_deg":0,"aggression":7,"posture_bias":"auto","lead_ticks":4,"circle_dir":1,"say":"","extra":1}""",
+    "unexpected extra key was accepted instead of rejected")
+  checkRejected("""{"weather":"fine"}""",
+    "unrelated JSON object was accepted")
+  checkRejected("I am afraid I cannot do that.",
+    "reply with no JSON object was accepted")
 
 # --- a 300-character note is cut to 160 RUNES ---------------------------
 block:
   let long = repeat("a", 300)
-  let a = parsed("""{"stance":"charge","note":"""" & long & """"}""")
+  let a = parseIntentReply(
+    """{"note":"""" & long & """","stance":"charge","aim":"foe","bearing_deg":0,"aggression":7,"posture_bias":"auto","lead_ticks":4,"circle_dir":1,"say":""}""")
   check a.note.runeLen == MaxNoteRunes,
     &"a 300-character note became {a.note.runeLen} runes, want {MaxNoteRunes}"
 
 # --- THE 4-BYTE EMOJI ON THE SAY BOUNDARY -------------------------------
 block:
-  ## The 48th and 49th characters are a 4-byte emoji. The cut MUST land on the
-  ## RUNE boundary: a byte-truncated codepoint renders in a browser and then
-  ## fails a strict UTF-8 parser, which is exactly the class of bug the rune
-  ## rule exists to prevent.
   let say = repeat("x", 47) & "\u{1F980}\u{1F980}" & "tail"
   check say.runeLen > MaxSayRunes, "the emoji fixture is not over the cap"
   let cut = truncateRunes(say, MaxSayRunes)
@@ -133,7 +110,6 @@ block:
     "the rune cut produced invalid UTF-8 — it landed mid-codepoint"
   check cut.endsWith("\u{1F980}"),
     "the rune cut did not keep the whole 4-byte codepoint"
-  ## And it round-trips through the replay's own JSON path.
   var intent = base
   intent.note = say
   intent.say = cut
@@ -153,30 +129,15 @@ block:
   check sanitizeSay("caf\u00e9 \u2014 ok").len > 0,
     "sanitizeSay dropped everything from a non-ASCII line"
 
-# --- a reply with NOTHING usable raises --------------------------------
-block:
-  var raised = false
-  try:
-    discard parsed("""{"weather":"fine"}""")
-  except IntentError:
-    raised = true
-  check raised, "a reply with no usable field did not raise"
-  raised = false
-  try:
-    discard parsed("I am afraid I cannot do that.")
-  except IntentError:
-    raised = true
-  check raised, "a reply with no JSON object did not raise"
-
 # --- the record vocabulary is bounded ----------------------------------
 block:
   let detail = repeat("z", 500)
-  let record = fallbackRecord(4, 1, 2, "timeout", detail)
+  let record = policyFailureRecord(4, 1, "timeout", detail)
   let node = parseJson(record)
   check node["detail"].getStr().runeLen <= MaxFallbackDetailRunes,
-    "fallback.detail is over its rune cap"
-  check node["cause"].getStr() == "timeout", "fallback.cause was lost"
-  let reg = parseJson(registerRecord(0, 1, repeat("p", 200), "llm", "pusher"))
+    "policy_failure.detail is over its rune cap"
+  check node["cause"].getStr() == "timeout", "policy_failure.cause was lost"
+  let reg = parseJson(registerRecord(0, 1, repeat("p", 200), "llm", ""))
   check reg["policy"].getStr().runeLen <= MaxPolicyLabelRunes,
     "register.policy is over its rune cap"
   check not reg.hasKey("prompt"),

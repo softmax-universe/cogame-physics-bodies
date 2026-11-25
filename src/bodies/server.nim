@@ -34,7 +34,7 @@ import bitworld/runtime
 import bitworld/spriteprotocol
 import mummy
 import sim, global, replays, broadcast, replay_runtime, events, wire_constants
-import intents, control, baselines, decide, prompts, training_capture
+import intents, control, baselines, decide, llm, prompts, training_capture
 
 when defined(posix):
   from std/posix import SHUT_RDWR, shutdown
@@ -53,6 +53,7 @@ type
     loadingReplayUri: string
     currentReplayUri: string
     chatMessages: Table[WebSocket, string]
+    decisionResponses: Table[WebSocket, string]
     playerIndices: Table[WebSocket, int]
     playerAddresses: Table[WebSocket, string]
     playerSlots: Table[WebSocket, int]
@@ -146,6 +147,7 @@ var appState: WebSocketAppState
 proc initAppState() =
   initLock(appState.lock)
   appState.chatMessages = initTable[WebSocket, string]()
+  appState.decisionResponses = initTable[WebSocket, string]()
   appState.playerIndices = initTable[WebSocket, int]()
   appState.playerAddresses = initTable[WebSocket, string]()
   appState.playerSlots = initTable[WebSocket, int]()
@@ -249,6 +251,7 @@ proc removeWebSocketState(websocket: WebSocket): int =
   appState.globalViewers.del(websocket)
   appState.playerViewers.del(websocket)
   appState.chatMessages.del(websocket)
+  appState.decisionResponses.del(websocket)
   appState.playerAddresses.del(websocket)
   appState.playerSlots.del(websocket)
   appState.playerTokens.del(websocket)
@@ -265,11 +268,12 @@ proc isSpritesOffPacket*(message: string): bool =
   message.len == 1 and message[0].uint8 == 0x87'u8
 
 proc parseRegistration*(text: string):
-    tuple[ok: bool, prompt, scripted, policy: string] =
-  ## A seat's ONE Sprite v1 chat message, read as its registration:
-  ##   {"type":"register","prompt":"…","scripted":"pusher"|null,"policy":"…"}
-  ## Anything that is not that object is not a registration.
-  result = (false, "", "", "")
+    tuple[ok: bool, isLlm: bool, scripted: Baseline, policy: string] =
+  ## A seat's registration message:
+  ##   {"type":"register","mode":"model","policy":"…"}
+  ##   {"type":"register","mode":"scripted","scripted":"pusher"|"anchor","policy":"…"}
+  ## Anything else is rejected — no silent default to `pusher`.
+  result = (false, false, blPusher, "")
   if text.len == 0 or text[0] != '{':
     return
   var node: JsonNode
@@ -279,11 +283,19 @@ proc parseRegistration*(text: string):
     return
   if node.kind != JObject or node{"type"}.getStr() != "register":
     return
-  result.ok = true
-  result.prompt = node{"prompt"}.getStr()
-  if not node{"scripted"}.isNil and node{"scripted"}.kind == JString:
-    result.scripted = node{"scripted"}.getStr()
-  result.policy = node{"policy"}.getStr()
+  let mode = node{"mode"}.getStr().strip().toLowerAscii()
+  if mode == "model":
+    result.ok = true
+    result.isLlm = true
+    result.policy = node{"policy"}.getStr()
+  elif mode == "scripted":
+    try:
+      result.scripted = parseBaseline(node{"scripted"}.getStr())
+      result.ok = true
+      result.isLlm = false
+      result.policy = node{"policy"}.getStr()
+    except ValueError:
+      return
 
 proc replayServerModeEnabled(): bool =
   {.gcsafe.}:
@@ -413,6 +425,18 @@ proc websocketHandler(websocket: WebSocket, event: WebSocketEvent,
     ## `game_contract_violation` (seen twice: lux-ai 0.1.0, snake-royale 0.1.0).
     if message.kind == Ping:
       websocket.send(message.data, Pong)
+    elif message.kind == TextMessage:
+      {.gcsafe.}:
+        withLock appState.lock:
+          if websocket in appState.playerViewers and
+              message.data.len > 0 and message.data[0] == '{':
+            try:
+              let node = parseJson(message.data)
+              if node.kind == JObject and
+                  node{"type"}.getStr() == "decision_response":
+                appState.decisionResponses[websocket] = message.data
+            except CatchableError:
+              discard
     elif message.kind == BinaryMessage:
       {.gcsafe.}:
         withLock appState.lock:
@@ -600,9 +624,22 @@ proc runServerLoop*(host: string = sim.DefaultHost,
     lastTurnKey = -1
     liveSpeedIndex = 0
     quitAfterFrame = false
+    policyFailed = false
     cmds = newSeq[uint8](BodyCount)
     reportedNoShow = false
     roundsRecorded = 0
+
+  template failPolicy(seatIdx: int, cause, detail: string) =
+    if not policyFailed:
+      policyFailed = true
+      quitAfterFrame = true
+      echo "physics-bodies: POLICY FAILURE seat=", seatIdx, " cause=", cause,
+        " detail=", detail
+      declarePlayerFailure(seatIdx, cause & ": " & detail)
+      engine.capture.finishFailure(seatIdx, cause, detail)
+      replayWriter.writeChat(tickTime(sim.tickCount), 0,
+        policyFailureRecord(sim.turnIndexAt(sim.tickCount), seatIdx, cause,
+          detail))
 
   ## Each `round` record rides the tick its round ENDED on. These records are
   ## FORENSIC — playback re-derives every round inside `bankRound` and
@@ -651,34 +688,25 @@ proc runServerLoop*(host: string = sim.DefaultHost,
     {.gcsafe.}:
       withLock appState.lock:
         for websocket in appState.closedSockets:
-          ## A seat that drops does NOT remove its bug: the bodies are fixed
-          ## for the whole episode, the seat's intent source degrades to
-          ## `pusher`, and it revives on reconnect.
           let index = removeWebSocketState(websocket)
           if not replayLoaded and index >= 0 and index < sim.players.len:
             replayWriter.writeLeave(tickTime(sim.tickCount), index)
             sim.removePlayerAt(index)
+            if sim.phase in {Playing, RoundReset} and not policyFailed:
+              failPolicy(index, "disconnected",
+                "player slot " & $index & " disconnected during match")
         appState.closedSockets.setLen(0)
 
         if not replayLoaded and sim.lobbyNoShowSeat >= 0 and
             not reportedNoShow:
-          ## A seat that never connects does NOT end the episode: report the
-          ## no-show (lowest missing slot only), then play on — that bug runs
-          ## the published `pusher` baseline for the whole match. The seat is
-          ## latched by `step` when the lobby budget expires (sim.nim, Lobby
-          ## branch), which also starts the round: reading the LATCH rather
-          ## than the lobby predicate is what makes the report survive the
-          ## phase change that happens on the very same tick.
+          ## A seat that never connects terminates the episode as an explicit
+          ## policy failure with NO substitute baseline and NO published scores.
           reportedNoShow = true
           let stuckSlot = int(sim.lobbyNoShowSeat)
-          declarePlayerFailure(stuckSlot,
+          failPolicy(stuckSlot, "no_show",
             "player slot " & $stuckSlot & " never joined the lobby within " &
               $config.lobbyJoinTimeoutTicks & " lobby ticks (~" &
-              $(config.lobbyJoinTimeoutTicks div TargetFps) &
-              "s); its bug plays the pusher baseline")
-          echo "physics-bodies: seat ", stuckSlot,
-            " never registered; driving ", alias(sim.bodyOfSeat(stuckSlot)),
-            " with pusher"
+              $(config.lobbyJoinTimeoutTicks div TargetFps) & "s)")
 
         if not replayLoaded:
           ## Admit pending joins in slot order — ACTUALLY in slot order. This
@@ -758,25 +786,25 @@ proc runServerLoop*(host: string = sim.DefaultHost,
             var policy = engine.seats[playerIndex]
             let firstRegistration = not policy.registered
             policy.registered = true
-            policy.prompt = registration.prompt.truncateRunes(MaxPromptRunes)
-            policy.isLlm = policy.prompt.len > 0
-            policy.baseline = parseBaseline(registration.scripted)
+            policy.isLlm = registration.isLlm
+            policy.baseline = registration.scripted
             policy.label =
               if registration.policy.len > 0: registration.policy
-              elif policy.isLlm: "prompt"
+              elif policy.isLlm: "model"
               else: $policy.baseline
             engine.seats[playerIndex] = policy
             sim.seatPolicyKind[playerIndex] = engine.policyKind(playerIndex)
             if firstRegistration:
               ## One `register` record and one log line per seat: the seat
               ## re-sends its registration for the first ~10 s of frames.
+              let baselineName = if policy.isLlm: "" else: $policy.baseline
               replayWriter.writeChat(tickTime(sim.tickCount), playerIndex,
                 registerRecord(playerIndex, sim.bodyOfSeat(playerIndex),
                   policy.label, engine.policyKind(playerIndex),
-                  $policy.baseline))
+                  baselineName))
               echo "seat ", playerIndex, " registered: kind=",
-                engine.policyKind(playerIndex), " baseline=",
-                $policy.baseline
+                engine.policyKind(playerIndex),
+                (if baselineName.len > 0: " baseline=" & baselineName else: "")
           appState.chatMessages.clear()
           for (websocket, chatText) in held:
             appState.chatMessages[websocket] = chatText
@@ -805,22 +833,174 @@ proc runServerLoop*(host: string = sim.DefaultHost,
         ## wasm viewer re-derives the whole match without running either.
         if sim.phase == Playing:
           let
-            elapsedSeconds = (getMonoTime() - episodeStart).inSeconds.int
             turnTicks = max(1, config.turnTicks)
             turnIndex = sim.tickCount div turnTicks
           if sim.tickCount mod turnTicks == 0 and turnIndex != lastTurnKey:
             lastTurnKey = turnIndex
-            let records = engine.turn(sim, turnIndex, elapsedSeconds)
-            for record in records:
-              replayWriter.writeChat(tickTime(sim.tickCount), 0, record)
-            for seat in 0 ..< sim.seatCount():
-              if not engine.haveIntent[seat]:
-                continue
+            let seatsCount = sim.seatCount()
+            if engine.capture != nil:
+              var observations: seq[JsonNode]
+              for seat in 0 ..< engine.seats.len:
+                observations.add(parseJson(seatViewJson(engine.viewFor(sim, seat))))
+              engine.capture.beginTurn(observations)
+
+            var openSockets: seq[(int, WebSocket)] = @[]
+            for seat in 0 ..< seatsCount:
+              if not engine.seats[seat].registered:
+                engine.capture.recordFailedDecision(seat, sim.tickCount, asMissing)
+                failPolicy(seat, "unregistered",
+                  "seat " & $seat & " did not register before turn " & $turnIndex)
+                break
+              if engine.seats[seat].isLlm:
+                var found = false
+                for idx, ws in sockets:
+                  if idx < playerIndices.len and playerIndices[idx] == seat:
+                    openSockets.add((seat, ws))
+                    found = true
+                    break
+                if not found:
+                  engine.capture.recordFailedDecision(seat, sim.tickCount, asMissing)
+                  failPolicy(seat, "disconnected",
+                    "model seat " & $seat & " is not connected on turn " & $turnIndex)
+                  break
+              else:
+                var intent = engine.scriptedFor(sim, seat, engine.seats[seat].baseline)
+                intent.source = isScripted
+                engine.installIntent(seat, intent)
+
+            if policyFailed:
+              break
+
+            if openSockets.len > 0:
+              if engine.batchStarted and config.turnSpacingMs > 0:
+                let since = (getMonoTime() - engine.lastBatchStart).inMilliseconds.int
+                if since < config.turnSpacingMs:
+                  sleep(min(config.turnSpacingMs, config.turnSpacingMs - since))
+              engine.lastBatchStart = getMonoTime()
+              engine.batchStarted = true
+
+              let sysPrompt = systemPrompt(engine.selection)
+              {.gcsafe.}:
+                withLock appState.lock:
+                  for (_, ws) in openSockets:
+                    appState.decisionResponses.del(ws)
+
+              for (seat, ws) in openSockets:
+                let req = %*{
+                  "type": "decision_request",
+                  "turn": turnIndex,
+                  "tick": sim.tickCount,
+                  "seat": seat,
+                  "system": sysPrompt,
+                  "observation": parseJson(seatViewJson(engine.viewFor(sim, seat))),
+                  "deadline_ms": config.turnBudgetMs
+                }
+                try:
+                  ws.send($req, TextMessage)
+                except CatchableError as err:
+                  engine.capture.recordFailedDecision(seat, sim.tickCount, asMissing)
+                  failPolicy(seat, "disconnected",
+                    "failed sending decision_request to seat " & $seat & ": " & err.msg)
+                  break
+
+            if policyFailed:
+              break
+
+            if openSockets.len > 0:
+              var pending = openSockets
+              let turnDeadline = getMonoTime() +
+                initDuration(milliseconds = max(1000, config.turnBudgetMs))
+              while pending.len > 0 and not policyFailed:
+                var nextPending: seq[(int, WebSocket)] = @[]
+                for (seat, ws) in pending:
+                  var rawResp = ""
+                  var isClosed = false
+                  {.gcsafe.}:
+                    withLock appState.lock:
+                      if ws in appState.decisionResponses:
+                        rawResp = appState.decisionResponses[ws]
+                        appState.decisionResponses.del(ws)
+                      elif ws in appState.closedSockets or ws notin appState.playerViewers:
+                        isClosed = true
+                  if isClosed:
+                    engine.capture.recordFailedDecision(seat, sim.tickCount, asMissing)
+                    failPolicy(seat, "disconnected",
+                      "model seat " & $seat & " disconnected while awaiting turn " & $turnIndex)
+                    break
+                  if rawResp.len == 0:
+                    nextPending.add((seat, ws))
+                    continue
+                  var node: JsonNode = nil
+                  try:
+                    node = parseJson(rawResp)
+                  except CatchableError:
+                    node = nil
+                  if node.isNil or node.kind != JObject or
+                      node{"turn"}.getInt(-1) != turnIndex:
+                    nextPending.add((seat, ws))
+                    continue
+                  var hasEvidence = false
+                  var evidence: DecisionAttempt
+                  if node.hasKey("attempt") and node["attempt"].kind == JObject:
+                    try:
+                      evidence = readAttemptEvidence(node["attempt"])
+                      hasEvidence = true
+                    except CatchableError:
+                      hasEvidence = false
+                  if node.hasKey("error") and node["error"].kind == JString and
+                      node["error"].getStr().len > 0:
+                    let errMsg = node["error"].getStr()
+                    let cause = node{"cause"}.getStr("provider_error")
+                    if hasEvidence:
+                      evidence.accepted = false
+                      if evidence.rejectionReason.isNone:
+                        evidence.rejectionReason = some(errMsg)
+                      engine.capture.recordAttempt(seat, evidence)
+                    engine.capture.recordFailedDecision(seat, sim.tickCount, asMissing)
+                    failPolicy(seat, cause, errMsg)
+                    break
+                  let replyText = node{"reply"}.getStr()
+                  try:
+                    var intent = parseIntentReply(replyText)
+                    intent.source = isLlm
+                    intent.latencyMs = node{"latency_ms"}.getInt(0)
+                    engine.installIntent(seat, intent)
+                    if hasEvidence:
+                      evidence.parsedAction = intent.intentAction()
+                      evidence.accepted = true
+                      engine.capture.recordAttempt(seat, evidence)
+                  except CatchableError as parseErr:
+                    if hasEvidence:
+                      evidence.accepted = false
+                      evidence.rejectionReason = some(parseErr.msg)
+                      engine.capture.recordAttempt(seat, evidence)
+                    engine.capture.recordFailedDecision(seat, sim.tickCount, asRejected)
+                    failPolicy(seat, "parse_error", parseErr.msg)
+                    break
+                if policyFailed:
+                  break
+                pending = nextPending
+                if pending.len > 0:
+                  if getMonoTime() >= turnDeadline:
+                    let (seat, _) = pending[0]
+                    engine.capture.recordFailedDecision(seat, sim.tickCount, asMissing)
+                    failPolicy(seat, "timeout",
+                      "model seat " & $seat & " did not respond within " &
+                      $config.turnBudgetMs & " ms on turn " & $turnIndex)
+                    break
+                  sleep(10)
+
+            if policyFailed:
+              break
+
+            for seat in 0 ..< seatsCount:
               let intent = engine.intents[seat]
-              case intent.source
-              of isLlm: inc sim.llmTurns[seat]
-              of isFallback: inc sim.fallbackTurns[seat]
-              of isScripted: discard
+              let origin = if intent.source == isLlm: aoModel else: aoTeacher
+              engine.capture.applied(seat, sim.tickCount, intent.intentAction(), origin,
+                if origin == aoTeacher: "scripted-" & $engine.seats[seat].baseline
+                else: engine.seats[seat].label)
+              if intent.source == isLlm:
+                inc sim.llmTurns[seat]
               let record = boundedIntentRecord(intent, turnIndex, seat,
                 sim.bodyOfSeat(seat))
               replayWriter.writeChat(tickTime(sim.tickCount), seat, record)
@@ -955,6 +1135,22 @@ proc runServerLoop*(host: string = sim.DefaultHost,
             discard markSocketClosed(globalViewers[i])
 
     if quitAfterFrame:
+      if policyFailed:
+        replayWriter.closeReplayWriter()
+        if saveReplayPath.len > 0 and fileExists(saveReplayPath):
+          let bytes = readFile(saveReplayPath)
+          {.gcsafe.}:
+            withLock appState.lock:
+              appState.replayBytes = bytes
+          runtimeConfig.writeReplay(bytes)
+        echo "physics-bodies: episode terminated on policy failure at tick ",
+          sim.tickCount, " (no scores published)"
+        let graceUntil = getMonoTime() + initDuration(seconds = 2)
+        while getMonoTime() < graceUntil:
+          sleep(100)
+        httpServer.close()
+        joinThread(serverThread)
+        break
       engine.capture.finishCapture(parseJson(sim.playerResultsJson()))
       ## The `result` control record: the full results document, written once
       ## into the replay chat stream at episode end, so the bytes are

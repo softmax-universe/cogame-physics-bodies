@@ -63,27 +63,32 @@ proc modelAttempt*(identity, policy, model, url, body: string,
   except CatchableError: discard # Original bytes remain authoritative for malformed/error responses.
 
 proc recordAttempt*(capture: RuntimeCapture, seat: int, evidence: DecisionAttempt) =
-  if capture != nil: capture.turn[seat].attempts.add(evidence)
+  if capture != nil and seat >= 0 and seat < capture.turn.len:
+    capture.turn[seat].attempts.add(evidence)
 
 proc applied*(capture: RuntimeCapture, seat, tick: int, action: JsonNode,
     origin: AttemptOrigin, policy: string) =
-  if capture == nil: return
+  if capture == nil or seat < 0 or seat >= capture.turn.len: return
   var attempts = capture.turn[seat].attempts
   var selected = none(string)
   for attempt in attempts:
     if attempt.accepted: selected = some(attempt.attemptId)
-  let fallback = origin == aoFallback or (origin == aoModel and selected.isNone)
-  if origin != aoModel or fallback:
-    var actual = newDecisionAttempt($tick & "-" & $seat & "-engine", policy,
-      if fallback: aoFallback else: origin)
+  if origin != aoModel:
+    var actual = newDecisionAttempt($tick & "-" & $seat & "-engine", policy, origin)
     actual.parsedAction = copy(action)
     actual.accepted = true
     selected = some(actual.attemptId)
     attempts.add(actual)
   capture.trajectory.recordDecision($tick & "-" & $seat, $seat,
-    capture.turn[seat].observation, attempts, selected, action,
-    if fallback: asFallback else: asAccepted,
-    fallbackOrigin = (if fallback: some(policy) else: none(string)))
+    capture.turn[seat].observation, attempts, selected, action, asAccepted)
+
+proc recordFailedDecision*(capture: RuntimeCapture, seat, tick: int,
+    status: ActionStatus) =
+  ## Records a terminal failed model decision with NO substitute action.
+  if capture == nil or seat < 0 or seat >= capture.turn.len: return
+  capture.trajectory.recordDecision($tick & "-" & $seat, $seat,
+    capture.turn[seat].observation, capture.turn[seat].attempts,
+    none(string), newJNull(), status)
 
 proc finishCapture*(capture: RuntimeCapture, outcome: JsonNode) =
   if capture == nil: return
@@ -93,4 +98,17 @@ proc finishCapture*(capture: RuntimeCapture, outcome: JsonNode) =
     of "deadline": esTruncated
     else: esFailed
   capture.trajectory.finish(status, outcome, outcome{"scores"})
+  capture.trajectory.writeEventsToUri(getEnv(CogameSaveTrajectoryUriEnv))
+
+proc finishFailure*(capture: RuntimeCapture, seat: int, cause, detail: string) =
+  ## Seals a failed episode with NO scores published and all failed attempts
+  ## preserved as evidence.
+  if capture == nil: return
+  let outcome = %*{
+    "reason": "policy_failure",
+    "failed_policy_index": seat,
+    "cause": cause,
+    "detail": detail
+  }
+  capture.trajectory.finish(esFailed, outcome, newJNull())
   capture.trajectory.writeEventsToUri(getEnv(CogameSaveTrajectoryUriEnv))

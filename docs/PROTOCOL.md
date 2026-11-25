@@ -6,20 +6,24 @@
 configured token demands exactly that token: a mismatch is refused with 403 and
 the socket is closed.
 
-A seat sends **one** Sprite v1 chat message carrying its registration, and then
-only receives:
+A seat sends **one** Sprite v1 chat message carrying its explicit registration:
 
 ```json
-{"type":"register","prompt":"<strategy text or empty>",
- "scripted":"pusher"|"anchor"|null,"policy":"<free label>"}
+{"type":"register","mode":"model","policy":"<free label>"}
+{"type":"register","mode":"scripted","scripted":"pusher"|"anchor","policy":"<free label>"}
 ```
 
-- `prompt` non-empty ⇒ this seat is an **LLM seat**. Capped at 4000 runes at the
-  transport (truncated, never rejected) and **never** written to the replay or
-  the results.
-- `scripted` names a baseline. A seat that sets neither field — or never
-  registers at all — is `pusher`, and the server says so out loud:
-  `physics-bodies: seat N never registered; driving BUG-<i+1> with pusher`.
+- `mode: "model"` ⇒ this seat is an **LLM seat** (`COWORLD_LLM_ENABLED=true`
+  and optional `PLAYER_PROMPT`, kept private inside the player container and
+  never sent over the wire or written to replays). Every 36 ticks the server
+  sends a JSON `decision_request` text frame to the player socket and waits for
+  a `decision_response` text frame carrying the model reply and attempt
+  evidence.
+- `mode: "scripted"` ⇒ this seat names an explicit baseline (`pusher` or
+  `anchor`) and makes zero LLM calls. There is no implicit default baseline; a
+  missing registration, no-show, disconnect, or invalid model response
+  terminates the episode as an explicit policy failure via
+  `COGAME_PLAYER_FAILURE_URI` with no substitute move and no published scores.
 - `policy` is a free label, capped at 48 runes, and is the only part of the
   registration the replay records.
 

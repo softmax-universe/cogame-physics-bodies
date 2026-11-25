@@ -165,9 +165,15 @@ extra_env = [kv for kv in (os.environ.get("SMOKE_EXTRA_ENV") or "").split() if "
 for slot in range(seats):
     player_id = cert_players[slot].get("player_id") if slot < len(cert_players) else None
     entry = by_id.get(player_id) or {}
+    entry_env = dict(entry.get("env") or {})
     env_args = []
-    for key, value in (entry.get("env") or {}).items():
+    for key, value in entry_env.items():
         env_args += ["-e", f"{key}={value}"]
+    if entry_env.get("COWORLD_LLM_ENABLED") == "true":
+        for llm_key in ("COWORLD_LLM_ENDPOINT", "ANTHROPIC_API_KEY"):
+            llm_val = os.environ.get(llm_key)
+            if llm_val:
+                env_args += ["-e", f"{llm_key}={llm_val}"]
     for kv in extra_env:
         env_args += ["-e", kv]
     argv = list(entry.get("run") or [player_bin])
@@ -191,11 +197,10 @@ chmod 777 "${work_dir}"
 docker network create "${network}" >/dev/null
 
 game_env=()
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-  game_env+=(-e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
-  echo "ANTHROPIC_API_KEY present: the LLM path will be exercised"
+if [ -n "${COWORLD_LLM_ENDPOINT:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "LLM credentials present: forwarded ONLY to model seats (COWORLD_LLM_ENABLED=true)"
 else
-  echo "no ANTHROPIC_API_KEY: the game must complete on its scripted baselines"
+  echo "no LLM credentials set: model seats will fail explicitly without fallback"
 fi
 
 echo "starting game container (${image} ${game_bin}) ..."
@@ -215,6 +220,7 @@ for ((slot = 0; slot < seats; slot++)); do
   eval "penv=( $(cat "${work_dir}/env-${slot}.args") )"
   eval "pcmd=( $(cat "${work_dir}/cmd-${slot}.args") )"
   docker run -d --name "${prefix}-p${slot}" --network "${network}" \
+    --add-host=host.docker.internal:host-gateway \
     -e COWORLD_PLAYER_WS_URL="ws://${prefix}-game:${port}/player?slot=${slot}&token=token-${slot}" \
     ${penv[@]+"${penv[@]}"} \
     "${image}" ${pcmd[@]+"${pcmd[@]}"} >/dev/null

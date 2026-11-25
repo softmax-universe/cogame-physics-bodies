@@ -1,207 +1,125 @@
-## Claude-backed bug orders. A policy is just a prompt: the GAME SERVER
-## composes the seat's observation plus that seat's PLAYER_PROMPT and asks
-## Claude what the bug does for the next 1.5 seconds.
+## Native LLM transport and game prompts for THE RING.
 ##
-## Kept from `coworld-ctf`'s `src/ctf/llm.nim` behaviour for behaviour — the
-## credential ladder, the single-haiku model list, the `throttled` fast-fail,
-## the fence-tolerant JSON extraction and the rune-boundary truncation are all
-## that file's, because they are all scar tissue from real hosted failures.
-##
-## THE RING is a SIMULTANEOUS-decision game, so both seats' calls go out as ONE
-## parallel batch per turn (`curly.makeRequests`, see decide.nim). Seats are
-## never queried sequentially: that is the documented way to blow the
-## wall-clock budget.
+## Hosted model seats run inside their own player container with the Coworld
+## LLM sidecar (`COWORLD_LLM_ENDPOINT`, `COWORLD_LLM_MODEL`). Local model runs
+## may also supply `ANTHROPIC_API_KEY` directly.
 ##
 ## Credentials, in order of preference:
-##   COWORLD_LLM_ENDPOINT (hosted), or local Bedrock bearer token
-##   ANTHROPIC_API_KEY
-##   ANTHROPIC_API_KEY_URI
-## With none of them the client disables itself and every turn falls back to the
-## scripted layer INSTANTLY, with no network wait — which is what lets offline
-## certification finish in seconds.
+##   COWORLD_LLM_ENDPOINT (hosted sidecar or local proxy, POST /v1/messages)
+##   ANTHROPIC_API_KEY    (direct Anthropic Messages API)
+## With neither configured, the client is disabled and model turns fail
+## explicitly without fabricating substitute actions.
 
 import std/[json, os, strutils]
-import bitworld/runtime
 import curly
 import sim_types, intents, prompts
 
 const
   AnthropicUrl = "https://api.anthropic.com/v1/messages"
   AnthropicVersion = "2023-06-01"
-  BedrockAnthropicVersion = "bedrock-2023-05-31"
+  DefaultSidecarModel* = "anthropic/claude-haiku-4.5"
+  DefaultAnthropicModel* = "claude-haiku-4-5-20251001"
 
 type
   LlmTransport* = enum
-    ltNone, ltSidecar, ltBedrock, ltAnthropic
+    ltNone, ltSidecar, ltAnthropic
 
   LlmClient* = ref object
     curl*: Curly
     transport*: LlmTransport
     apiKey: string
     sidecarEndpoint: string
-    bedrockEndpoint: string
-    bedrockModels: seq[string]
-    bedrockModel: int
-    bedrockToken: string
     model*: string
     maxOutputTokens*: int
     disabled*: bool
-    throttled*: bool
-      ## The provider answered 429 and there is no other candidate model to
-      ## rotate to. Set per turn, cleared by the turn loop: retrying inside the
-      ## same turn cannot succeed, so the seat fails fast to the scripted
-      ## fallback instead of spending the turn budget on a refused call.
 
   LlmError* = object of ValueError
 
-proc resolveApiKey(): string =
-  result = getEnv("ANTHROPIC_API_KEY").strip()
-  if result.len > 0:
-    return
-  let uri = getEnv("ANTHROPIC_API_KEY_URI").strip()
-  if uri.len == 0:
-    return ""
-  try:
-    result = readCogameUri(uri, "ANTHROPIC_API_KEY_URI").strip()
-  except CatchableError as error:
-    echo "physics-bodies llm: failed to fetch ANTHROPIC_API_KEY_URI: ",
-      error.msg
-    result = ""
+proc resolveAnthropicModel(requested: string): string =
+  let candidate = requested.strip()
+  if candidate.len == 0 or candidate == DefaultSidecarModel:
+    return DefaultAnthropicModel
+  if candidate.startsWith("anthropic/"):
+    let bare = candidate["anthropic/".len .. ^1]
+    if bare == "claude-haiku-4.5":
+      return DefaultAnthropicModel
+    return bare
+  candidate
 
-proc bedrockModelIds(): seq[string] =
-  ## Bedrock inference-profile candidates, tried in order; BEDROCK_MODEL pins
-  ## one. There is exactly ONE candidate — haiku — because every sonnet
-  ## inference profile times out on every sidecar call (cogame-raid round 2,
-  ## 2026-08-23). With no second candidate a throttle fails fast (see
-  ## `LlmClient.throttled`) and the seat plays the scripted fallback for that
-  ## turn only.
-  let pinned = getEnv("BEDROCK_MODEL").strip()
-  if pinned.len > 0:
-    return @[pinned]
-  @["us.anthropic.claude-haiku-4-5-20251001-v1:0"]
-
-proc tryNextBedrockModel(client: LlmClient, why: string): bool =
-  if client.transport != ltBedrock or
-      client.bedrockModel + 1 >= client.bedrockModels.len:
-    return false
-  client.bedrockModel.inc
-  echo "physics-bodies llm: ", client.bedrockModels[client.bedrockModel - 1],
-    " unusable (", why, "); falling back to ",
-    client.bedrockModels[client.bedrockModel]
-  true
-
-proc bedrockUrl(client: LlmClient): string =
-  client.bedrockEndpoint & "/model/" &
-    client.bedrockModels[client.bedrockModel] & "/invoke"
-
-proc newLlmClient*(config: GameConfig): LlmClient =
+proc newLlmClient*(model = "", maxOutputTokens = MaxOutputTokensDefault): LlmClient =
   result = LlmClient(
-    model: (if config.model.len > 0: config.model
-            else: "claude-haiku-4-5-20251001"),
-    maxOutputTokens: max(1, config.maxOutputTokens)
+    model: (if model.len > 0: model else: DefaultSidecarModel),
+    maxOutputTokens: max(1, maxOutputTokens)
   )
   let sidecarEndpoint = getEnv("COWORLD_LLM_ENDPOINT").strip()
   if sidecarEndpoint.len > 0:
     result.transport = ltSidecar
     result.sidecarEndpoint = sidecarEndpoint.strip(chars = {'/'}, leading = false)
-    result.model = getEnv("COWORLD_LLM_MODEL", "anthropic/claude-haiku-4.5")
+    let envModel = getEnv("COWORLD_LLM_MODEL").strip()
+    result.model =
+      if envModel.len > 0: envModel
+      elif model.len > 0: model
+      else: DefaultSidecarModel
     result.curl = newCurly()
     return
-  let
-    bedrockEndpoint = getEnv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME").strip()
-    bedrockToken = getEnv("AWS_BEARER_TOKEN_BEDROCK").strip()
-  if bedrockEndpoint.len > 0 or bedrockToken.len > 0:
-    let region = getEnv("AWS_REGION", getEnv("AWS_DEFAULT_REGION", "us-west-2"))
-    let endpoint =
-      if bedrockEndpoint.len > 0: bedrockEndpoint
-      else: "https://bedrock-runtime." & region & ".amazonaws.com"
-    result.transport = ltBedrock
-    result.bedrockEndpoint = endpoint.strip(chars = {'/'}, leading = false)
-    result.bedrockModels = bedrockModelIds()
-    result.bedrockToken = bedrockToken
-    result.curl = newCurly()
-    echo "physics-bodies llm: bedrock transport, model ",
-      result.bedrockModels[result.bedrockModel]
-    return
-  result.apiKey = resolveApiKey()
+  result.apiKey = getEnv("ANTHROPIC_API_KEY").strip()
   if result.apiKey.len > 0:
     result.transport = ltAnthropic
+    let envModel = getEnv("ANTHROPIC_MODEL", getEnv("COWORLD_LLM_MODEL")).strip()
+    result.model = resolveAnthropicModel(
+      if envModel.len > 0: envModel else: model)
     result.curl = newCurly()
-    echo "physics-bodies llm: anthropic transport, model ", result.model
-  else:
-    result.transport = ltNone
-    result.disabled = true
-    ## The exact phrase phase 60 greps the GAME log for, alongside "falling
-    ## back" in decide.nim: "LLM provider is unavailable".
-    echo "physics-bodies llm: no credentials — the LLM provider is ",
-      "unavailable; every turn is falling back to the scripted layer"
+    return
+  result.transport = ltNone
+  result.disabled = true
+
+proc newLlmClient*(config: GameConfig): LlmClient =
+  newLlmClient(config.model, config.maxOutputTokens)
 
 proc requestFor*(client: LlmClient, system, user: string, slot: int):
     tuple[url: string, headers: HttpHeaders, body: string] =
   ## One Messages-API request, shaped for whichever transport is live.
   var body = %*{
+    "model": client.model,
     "max_tokens": client.maxOutputTokens,
     "system": system,
     "messages": [{"role": "user", "content": user}]
   }
   var headers: HttpHeaders
-  if client.transport == ltSidecar and slot >= 0:
-    headers["X-Coworld-Player-Slot"] = $slot
   headers["content-type"] = "application/json"
-  if client.transport == ltBedrock:
-    body["anthropic_version"] = %BedrockAnthropicVersion
-    if client.bedrockToken.len > 0:
-      headers["authorization"] = "Bearer " & client.bedrockToken
-    result.url = client.bedrockUrl()
-  elif client.transport == ltSidecar:
-    body["model"] = %client.model
-    headers["anthropic-version"] = AnthropicVersion
+  headers["anthropic-version"] = AnthropicVersion
+  if client.transport == ltSidecar:
+    if slot >= 0:
+      headers["X-Coworld-Player-Slot"] = $slot
     result.url = client.sidecarEndpoint & "/v1/messages"
   else:
-    body["model"] = %client.model
-    ## Only the Claude 5 / Opus tiers accept an effort setting; Haiku 4.5
-    ## rejects the whole request with a 400 if it is present.
-    if "haiku" notin client.model and "4-5" notin client.model:
-      body["output_config"] = %*{"effort": "low"}
     headers["x-api-key"] = client.apiKey
-    headers["anthropic-version"] = AnthropicVersion
     result.url = AnthropicUrl
   result.headers = headers
   result.body = $body
 
 proc textOf*(client: LlmClient, response: Response, error, url: string): string =
-  ## The text of one batched reply, or an LlmError describing why there is
-  ## none. Auth failure disables the client for the rest of the episode;
-  ## model-access denial and throttling rotate the Bedrock model instead.
+  ## The text of one reply, or an LlmError describing why there is none.
   if error.len > 0:
     raise newException(LlmError, "llm transport: " & error)
   if response.code == 401 or response.code == 403:
-    ## RUNE-safe: this text becomes `fallback.detail` in the replay, and a
-    ## provider body is arbitrary bytes. A byte slice can cut a codepoint in
-    ## half, and truncateRunes downstream only SHORTENS — it cannot repair one.
     let detail = response.body.truncateRunes(MaxFallbackDetailRunes)
-    if "Model access is denied" in response.body and
-        client.tryNextBedrockModel("no model access"):
-      raise newException(LlmError, "bedrock model access denied: " & detail)
     client.disabled = true
     raise newException(LlmError,
       "llm auth failed (" & $response.code & ") at " & url & ": " & detail)
   if response.code == 429:
     let detail = response.body.truncateRunes(MaxFallbackDetailRunes)
-    if not client.tryNextBedrockModel("throttled"):
-      ## Nothing left to rotate to: a second call this turn would be refused
-      ## the same way, so the turn loop must not spend its retry on it.
-      client.throttled = true
     raise newException(LlmError, "llm throttled (429): " & detail)
   if response.code < 200 or response.code >= 300:
-    raise newException(LlmError, "anthropic error " & $response.code & ": " &
+    raise newException(LlmError, "llm error " & $response.code & ": " &
       response.body.truncateRunes(MaxFallbackDetailRunes))
   let payload = parseJson(response.body)
   if payload{"stop_reason"}.getStr() == "refusal":
-    raise newException(LlmError, "anthropic refusal")
-  for contentBlock in payload["content"]:
-    if contentBlock{"type"}.getStr() == "text":
-      result.add(contentBlock{"text"}.getStr())
+    raise newException(LlmError, "llm refusal")
+  if payload.hasKey("content") and payload["content"].kind == JArray:
+    for contentBlock in payload["content"]:
+      if contentBlock{"type"}.getStr() == "text":
+        result.add(contentBlock{"text"}.getStr())
   if payload{"stop_reason"}.getStr() == "max_tokens" and '{' notin result:
     raise newException(LlmError, "reply cut off at max_tokens before any " &
       "JSON: " & result.truncateRunes(160).replace("\n", " "))
@@ -323,5 +241,4 @@ proc userMessage*(operatorPrompt: string, viewJson: string): string =
   operatorBlock(operatorPrompt) & viewJson
 
 proc requestedModel*(client: LlmClient): string =
-  if client.transport == ltBedrock: client.bedrockModels[client.bedrockModel]
-  else: client.model
+  client.model

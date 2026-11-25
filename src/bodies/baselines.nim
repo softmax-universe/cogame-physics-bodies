@@ -42,11 +42,13 @@ type
     last*: BugIntent
 
 proc parseBaseline*(text: string): Baseline =
-  ## A seat that registers with neither field — or never registers at all — is
-  ## `pusher`, the certification player and the per-turn fallback.
+  ## Strictly resolves an explicit scripted baseline name.
   case text.strip().toLowerAscii()
+  of "pusher": blPusher
   of "anchor": blAnchor
-  else: blPusher
+  else:
+    raise newException(ValueError,
+      "unknown scripted baseline (expected pusher or anchor): " & text)
 
 proc seatView*(sim: SimServer, seat: int, hasLast: bool,
                last: BugIntent): SeatView =
