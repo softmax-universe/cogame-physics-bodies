@@ -67,6 +67,7 @@ proc handleDecisionRequest(client: LlmClient, prompt, label: string,
       "attempt": attemptEvidenceJson(evidence)
     })
 
+  client.maxOutputTokens = payload["max_tokens"].getInt()
   let request = client.requestFor(system, user, seat)
   var batch: RequestBatch
   batch.post(request.url, request.headers, request.body, $seat)

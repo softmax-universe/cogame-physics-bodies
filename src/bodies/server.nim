@@ -893,7 +893,8 @@ proc runServerLoop*(host: string = sim.DefaultHost,
                   "seat": seat,
                   "system": sysPrompt,
                   "observation": parseJson(seatViewJson(engine.viewFor(sim, seat))),
-                  "deadline_ms": config.turnBudgetMs
+                  "deadline_ms": config.turnBudgetMs,
+                  "max_tokens": config.maxOutputTokens
                 }
                 try:
                   ws.send($req, TextMessage)
